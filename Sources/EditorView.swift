@@ -517,7 +517,8 @@ struct EditorView: View {
             let extra: CGFloat = (bar == .colors && place(of: .tools) == nil && toolsDock == colorsDock)
                 ? (d.vertical ? 62 : 58) : 0
             switch d {
-            case .top: p = CGPoint(x: size.width / 2, y: 8 + extra + sz.height / 2)
+            // In a narrow window (split screen) the top bars drop below the back, + and ⋯ buttons.
+            case .top: p = CGPoint(x: size.width / 2, y: 8 + (size.width < 820 ? 58 : 0) + extra + sz.height / 2)
             case .bottom: p = CGPoint(x: size.width / 2, y: size.height - 14 - extra - sz.height / 2)
             case .left: p = CGPoint(x: 14 + extra + sz.width / 2, y: size.height / 2)
             case .right: p = CGPoint(x: size.width - 14 - extra - sz.width / 2, y: size.height / 2)
@@ -641,7 +642,7 @@ struct EditorView: View {
         let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
         let items = extraItems
         // Leave room for the side groups; extra tools scroll when they don't fit.
-        let available = vertical ? size.height - 170 : size.width - (toolsDock == .top ? 430 : 120)
+        let available = vertical ? size.height - 170 : size.width - (toolsDock == .top && size.width >= 820 ? 430 : 60)
         let room = max(88, available - 232)
         let extrasLength = CGFloat(items.count) * 44
         return layout {
