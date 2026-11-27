@@ -3,16 +3,34 @@ import PencilKit // only to read notebooks saved before Folio had its own pens
 
 // MARK: - Model
 
-/// Folio's own pens.
-enum InkStyle: UInt8 {
-    case ballpoint = 0
-    case fountain = 1
-    case highlighter = 2
+/// Folio's own pens. Stored as one byte per stroke: 0–4 are the fixed pens, and 16–31 are the
+/// flat-nib fountain pen at 16 levels of flatness.
+struct InkStyle: Hashable {
+    let rawValue: UInt8
+
+    init?(rawValue: UInt8) {
+        guard rawValue <= 4 || (16...31).contains(rawValue) else { return nil }
+        self.rawValue = rawValue
+    }
+    private init(_ v: UInt8) { rawValue = v }
+
+    static let ballpoint = InkStyle(0)
+    static let fountain = InkStyle(1)
+    static let highlighter = InkStyle(2)
     /// Soft brush: very pressure sensitive, pointed ends.
-    case brush = 3
-    /// Flat calligraphy nib held at a fixed angle: thick downstrokes, hairline sideways strokes,
-    /// crisp angled ends (the fountain pen since 1.9).
-    case nib = 4
+    static let brush = InkStyle(3)
+    /// Flat calligraphy nib written by 1.9 (flatness 0.85).
+    static let nib = InkStyle(4)
+
+    /// The flat-nib fountain pen at a flatness from 0 (square nib) to 1 (thinnest hairlines).
+    static func nibStyle(flatness f: Double) -> InkStyle {
+        InkStyle(16 + UInt8((min(max(f, 0), 1) * 15).rounded()))
+    }
+
+    var isNib: Bool { rawValue == 4 || rawValue >= 16 }
+    var nibFlatness: CGFloat { rawValue >= 16 ? CGFloat(rawValue - 16) / 15 : 0.85 }
+    /// The nib's thickness as a share of its length.
+    var nibThickness: CGFloat { 0.05 + 0.95 * pow(1 - nibFlatness, 1.5) }
 }
 
 /// One sampled point of a stroke, in page units, with the line width at that point.
@@ -244,6 +262,11 @@ struct InkPen: Equatable {
     func width(pressure p: CGFloat, direction: CGFloat) -> CGFloat {
         if style == .highlighter || shapes { return width }
         let k = CGFloat(feel.pressure)
+        if style.isNib {
+            // Width here is the nib's length; the stroke's thickness comes from its direction.
+            let pe = sin(min(max(p, 0), 1) * .pi / 2)
+            return width * 1.35 * max(1 - 0.5 * k + 0.8 * k * pe, 0.3)
+        }
         var w: CGFloat
         switch style {
         case .fountain:
@@ -251,10 +274,6 @@ struct InkPen: Equatable {
             let pe = sin(min(max(p, 0), 1) * .pi / 2)
             w = width * max(1 - 0.7 * k + 1.25 * k * pe, 0.2)
         case .brush: w = width * max(1 - 1.5 * k + 2.6 * k * p, 0.06)
-        case .nib:
-            // Width here is the nib's length; the stroke's thickness comes from its direction.
-            let pe = sin(min(max(p, 0), 1) * .pi / 2)
-            return width * 1.35 * max(1 - 0.5 * k + 0.8 * k * pe, 0.3)
         default: w = width * max(1 - 0.56 * k + 1.12 * k * p, 0.12)
         }
         // A nib held at 45°: thin going one way, full going the other.
@@ -361,45 +380,66 @@ enum InkRenderer {
 
     /// The filled shape of a stroke in its pen's style.
     static func shape(_ pts: [InkPoint], style: InkStyle) -> CGPath {
-        style == .nib ? nibOutline(pts) : outline(pts)
+        style.isNib ? nibOutline(pts, thickness: style.nibThickness) : outline(pts)
     }
 
     /// The flat nib's angle: its edge rises to the right, so it's thin travelling up-right
     /// and thickest going straight down.
     static let nibAngle: CGFloat = -22 * .pi / 180
-    /// Thickness of the nib itself (its hairline), as a share of its length.
-    static let nibThickness: CGFloat = 0.11
 
-    /// A flat nib dragged along the line: the nib (a thin rectangle) at every point, joined by
-    /// the band its edge sweeps between points. All wound the same way so they merge cleanly.
-    static func nibOutline(_ pts: [InkPoint]) -> CGPath {
+    /// A flat nib (a thin rectangle, `thickness` × its length) dragged along the line. Each step
+    /// adds the exact area the nib sweeps (the convex hull of the nib at both ends), so the
+    /// edges come out clean and smooth, with crisp angled ends.
+    static func nibOutline(_ pts: [InkPoint], thickness: CGFloat) -> CGPath {
         let path = CGMutablePath()
         guard !pts.isEmpty else { return path }
         let avg = CGFloat(pts.reduce(Float(0)) { $0 + $1.w }) / CGFloat(pts.count)
-        let dense = densify(pts, spacing: max(0.2, min(0.9, avg * nibThickness * 0.7)))
+        let dense = densify(pts, spacing: max(0.3, min(1.0, avg * 0.2)))
         let ux = cos(nibAngle), uy = sin(nibAngle)
         let nx = -uy, ny = ux
+        func nib(_ p: InkPoint) -> [CGPoint] {
+            let hl = max(p.width / 2, 0.3)
+            let ht = max(hl * thickness, 0.18)
+            let c = p.cg
+            let hx = ux * hl, hy = uy * hl, kx = nx * ht, ky = ny * ht
+            return [CGPoint(x: c.x - hx - kx, y: c.y - hy - ky), CGPoint(x: c.x + hx - kx, y: c.y + hy - ky),
+                    CGPoint(x: c.x + hx + kx, y: c.y + hy + ky), CGPoint(x: c.x - hx + kx, y: c.y - hy + ky)]
+        }
         func add(_ q: [CGPoint]) {
+            guard q.count > 2 else { return }
             var q = q
             if signedArea(q) < 0 { q.reverse() }
             path.addLines(between: q)
             path.closeSubpath()
         }
-        for i in dense.indices {
-            let p = dense[i].cg
-            let hl = max(dense[i].width / 2, 0.3)
-            let ht = max(hl * 2 * nibThickness / 2, 0.18)
-            let hx = ux * hl, hy = uy * hl, kx = nx * ht, ky = ny * ht
-            add([CGPoint(x: p.x - hx - kx, y: p.y - hy - ky), CGPoint(x: p.x + hx - kx, y: p.y + hy - ky),
-                 CGPoint(x: p.x + hx + kx, y: p.y + hy + ky), CGPoint(x: p.x - hx + kx, y: p.y - hy + ky)])
-            guard i > 0 else { continue }
-            let a = dense[i - 1].cg
-            guard hypot(p.x - a.x, p.y - a.y) > 0.0001 else { continue }
-            let ha = max(dense[i - 1].width / 2, 0.3)
-            add([CGPoint(x: a.x - ux * ha, y: a.y - uy * ha), CGPoint(x: a.x + ux * ha, y: a.y + uy * ha),
-                 CGPoint(x: p.x + hx, y: p.y + hy), CGPoint(x: p.x - hx, y: p.y - hy)])
+        var prev = nib(dense[0])
+        if dense.count == 1 { add(prev); return path }
+        for i in 1..<dense.count {
+            let cur = nib(dense[i])
+            add(convexHull(prev + cur))
+            prev = cur
         }
         return path
+    }
+
+    /// Smallest convex shape around the points (monotone chain).
+    private static func convexHull(_ pts: [CGPoint]) -> [CGPoint] {
+        let s = pts.sorted { $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x }
+        guard s.count > 2 else { return s }
+        func cross(_ o: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+            (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+        }
+        var lower: [CGPoint] = []
+        for p in s {
+            while lower.count >= 2 && cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 { lower.removeLast() }
+            lower.append(p)
+        }
+        var upper: [CGPoint] = []
+        for p in s.reversed() {
+            while upper.count >= 2 && cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 { upper.removeLast() }
+            upper.append(p)
+        }
+        return Array(lower.dropLast()) + Array(upper.dropLast())
     }
 
     /// The filled shape of a pen stroke whose width changes along the way: a disc at every

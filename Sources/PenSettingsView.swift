@@ -361,7 +361,7 @@ struct PenSettingsView: View {
                     .font(.system(size: 22, weight: .regular, design: .serif))
                     .frame(maxWidth: .infinity)
                     .contentTransition(.opacity)
-                StrokePreview(style: tools.pen.kind.inkStyle, color: tools.pen.uiColor, width: tools.pen.width,
+                StrokePreview(style: tools.pen.inkStyle, color: tools.pen.uiColor, width: tools.pen.width,
                               feel: tools.pen.inkFeel)
                     .frame(height: 76)
 
@@ -443,7 +443,7 @@ struct PenSettingsView: View {
                     VStack(spacing: 6) {
                         ForEach(tools.favorites) { fav in
                             HStack(spacing: 10) {
-                                StrokePreview(style: fav.kind.inkStyle, color: fav.uiColor, width: fav.width, feel: fav.inkFeel)
+                                StrokePreview(style: fav.inkStyle, color: fav.uiColor, width: fav.width, feel: fav.inkFeel)
                                     .frame(height: 34)
                                     .onTapGesture { tools.selectFavorite(fav) }
                                 Button(role: .destructive) { withAnimation(.spring) { tools.removeFavorite(fav.id) } } label: {

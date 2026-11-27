@@ -531,31 +531,8 @@ final class InkCanvasView: UIView {
         drawing.strokes.removeAll { ids.contains($0.id) }
         publish()
         invalidate(hit.reduce(b) { $0.union($1.bounds) })
-        // The scribble and the ink under it fade away together.
-        let scribble = CAShapeLayer()
-        scribble.path = liveLayer.path
-        scribble.fillColor = liveLayer.fillColor
-        scribble.strokeColor = liveLayer.strokeColor
-        scribble.lineWidth = liveLayer.lineWidth
-        scribble.contentsScale = sharpness()
-        overlay.layer.addSublayer(scribble)
+        // No animation: the scribble and the ink under it just go.
         liveLayer.path = nil
-        fadeAndRemove(scribble, duration: 0.25)
-        for s in hit.prefix(80) {
-            let l = CAShapeLayer()
-            l.path = s.style == .highlighter ? InkRenderer.centerline(s.points) : InkRenderer.shape(s.points, style: s.style)
-            l.contentsScale = sharpness()
-            if s.style == .highlighter {
-                l.fillColor = nil
-                l.strokeColor = s.color.uiColor.cgColor
-                l.lineWidth = s.points.first?.width ?? 10
-                l.opacity = 0.35
-            } else {
-                l.fillColor = s.color.uiColor.cgColor
-            }
-            overlay.layer.insertSublayer(l, below: scribble)
-            fadeAndRemove(l, duration: 0.3)
-        }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         onCommit?(self, before, drawing)
         return true

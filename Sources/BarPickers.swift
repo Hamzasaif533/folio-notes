@@ -14,7 +14,7 @@ struct PenTypePicker: View {
                         .contentTransition(.opacity)
                         .padding(.top, 4)
 
-                    StrokePreview(style: tools.pen.kind.inkStyle, color: tools.pen.uiColor, width: tools.pen.width,
+                    StrokePreview(style: tools.pen.inkStyle, color: tools.pen.uiColor, width: tools.pen.width,
                                   feel: tools.pen.inkFeel)
                         .frame(height: 80)
 
@@ -25,8 +25,7 @@ struct PenTypePicker: View {
                     VStack(spacing: 16) {
                         feel("Tip Sharpness", \.tipSharpness)
                         feel("Pressure Sensitivity", \.pressure)
-                        // The fountain pen's flat nib has its own fixed shape.
-                        if tools.pen.kind != .fountain { feel("Tip Flatness", \.tipFlatness) }
+                        feel("Tip Flatness", \.tipFlatness)
                         feel("Stroke Stabilization", \.stabilization)
                         if tools.pen.inkFeel != tools.pen.kind.defaultFeel {
                             Button {
