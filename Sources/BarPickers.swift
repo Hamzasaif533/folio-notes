@@ -1,47 +1,130 @@
 import SwiftUI
 
-/// Tapping the pen that's already in use: just pick the pen type.
+/// Tapping the pen that's already in use: pick Fountain, Ball or Brush pen and tune how it feels.
 struct PenTypePicker: View {
     @EnvironmentObject var tools: ToolState
 
     var body: some View {
-        VStack(spacing: 6) {
-            ForEach(InkKind.penKinds) { kind in
-                let on = tools.pen.kind == kind
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) { tools.pen.kind = kind }
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: kind.symbol)
-                            .font(.system(size: 18, weight: .medium))
-                            .frame(width: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(kind.title).font(.body.weight(.semibold))
-                            Text(kind == .fountain ? "Thick and thin, like ink" : "Smooth, even line")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.55))
-                        }
-                        Spacer()
-                        if on {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(Theme.action)
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    Text(tools.pen.kind.title)
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .contentTransition(.opacity)
+                        .padding(.top, 4)
+
+                    StrokePreview(style: tools.pen.kind.inkStyle, color: tools.pen.uiColor, width: tools.pen.width,
+                                  feel: tools.pen.inkFeel)
+                        .frame(height: 80)
+
+                    HStack(spacing: 10) {
+                        ForEach(InkKind.penKinds) { kind in tile(kind) }
+                    }
+
+                    VStack(spacing: 16) {
+                        feel("Tip Sharpness", \.tipSharpness)
+                        feel("Pressure Sensitivity", \.pressure)
+                        feel("Tip Flatness", \.tipFlatness)
+                        feel("Stroke Stabilization", \.stabilization)
+                        if tools.pen.inkFeel != tools.pen.kind.defaultFeel {
+                            Button {
+                                withAnimation(.snappy) { tools.pen.feel = nil }
+                            } label: {
+                                Text("Reset to Default")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(Theme.action)
+                            }
+                            .buttonStyle(.plain)
+                            .transition(.opacity)
                         }
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .frame(height: 56)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(on ? Theme.action.opacity(0.22) : Color.white.opacity(0.06)))
-                    .contentShape(Rectangle())
+                    .padding(16)
+                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(hex: "#1C1C1E")))
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Settings")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white)
+                        NavigationLink {
+                            PenSettingsView(embedded: true).environmentObject(tools)
+                        } label: {
+                            HStack {
+                                Text("Pen Settings").foregroundStyle(.white)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.4))
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(height: 50)
+                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(hex: "#1C1C1E")))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(PressableStyle())
+                .padding(16)
             }
+            .toolbar(.hidden, for: .navigationBar)
+            .background(Color(hex: "#2C2C2E"))
         }
-        .padding(12)
-        .frame(width: 270)
+        .tint(Theme.action)
+        .animation(.snappy(duration: 0.2), value: tools.pen.kind)
+        .frame(width: 360, height: 640)
         .presentationCompactAdaptation(.popover)
         .darkPanel()
+    }
+
+    private func tile(_ kind: InkKind) -> some View {
+        let on = tools.pen.kind == kind
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) { tools.choosePen(kind) }
+        } label: {
+            VStack(spacing: 8) {
+                PenTipIcon(kind: kind, color: Color(hex: tools.pen.colorHex))
+                    .frame(width: 24, height: 44)
+                    .offset(y: on ? -3 : 0)
+                Text(kind.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 92)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(on ? Theme.action.opacity(0.25) : Color(hex: "#1C1C1E")))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(on ? Theme.action : Color.clear, lineWidth: 2))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.94))
+        .accessibilityLabel(kind.title)
+    }
+
+    private func feel(_ title: String, _ key: WritableKeyPath<InkFeel, Double>) -> some View {
+        let value = Binding<Double>(
+            get: { tools.pen.inkFeel[keyPath: key] },
+            set: { v in
+                var f = tools.pen.inkFeel
+                f[keyPath: key] = v
+                tools.pen.feel = f
+            })
+        return VStack(spacing: 6) {
+            HStack {
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+                Text("\(Int((value.wrappedValue * 100).rounded()))%")
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+            }
+            Slider(value: value, in: 0...1)
+        }
     }
 }
 

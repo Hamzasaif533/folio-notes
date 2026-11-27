@@ -42,7 +42,7 @@ struct EditorRoot: View {
     }
 }
 
-/// Two notebooks at once. Drag the divider to resize; its handle swaps the sides,
+/// Two notebooks at once. Drag the middle handle to resize; hold it to swap the sides,
 /// turns the split between side by side and top and bottom, or ends the split.
 struct SplitEditorView: View {
     @Binding var first: Notebook
@@ -52,23 +52,46 @@ struct SplitEditorView: View {
 
     @AppStorage("folio.splitSideBySide") private var sideBySide = true
     @AppStorage("folio.splitFraction") private var fraction = 0.5
-    @State private var dragStart: Double?
+    /// How far the handle has been dragged; the sides only resize when it's let go.
+    @State private var dragOffset: CGFloat?
 
-    private static let divider: CGFloat = 14
+    private static let divider: CGFloat = 4
 
     var body: some View {
         GeometryReader { geo in
             let total = sideBySide ? geo.size.width : geo.size.height
-            let firstLength = max(0, (total - Self.divider) * CGFloat(fraction))
+            let usable = max(total - Self.divider, 1)
+            let firstLength = max(0, usable * CGFloat(fraction))
+            let pos = min(max(firstLength + (dragOffset ?? 0), usable * 0.2), usable * 0.8)
             let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
-            layout {
-                pane(first, other: second, bars: true, replace: { first = $0 })
-                    .frame(width: sideBySide ? firstLength : nil, height: sideBySide ? nil : firstLength)
-                dividerBar(total: total)
-                pane(second, other: first, bars: false, replace: { second = $0 })
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZStack(alignment: .topLeading) {
+                layout {
+                    pane(first, other: second, bars: true, replace: { first = $0 })
+                        .frame(width: sideBySide ? firstLength : nil, height: sideBySide ? nil : firstLength)
+                    Rectangle()
+                        .fill(Color(hex: "#1C1C1E"))
+                        .frame(width: sideBySide ? Self.divider : nil, height: sideBySide ? nil : Self.divider)
+                    pane(second, other: first, bars: false, replace: { second = $0 })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .animation(.easeOut(duration: 0.25), value: sideBySide)
+
+                // While dragging: a line showing where the split will land.
+                if dragOffset != nil {
+                    Rectangle()
+                        .fill(Theme.action)
+                        .frame(width: sideBySide ? Self.divider : geo.size.width,
+                               height: sideBySide ? geo.size.height : Self.divider)
+                        .shadow(color: .black.opacity(0.35), radius: 4)
+                        .offset(x: sideBySide ? pos : 0, y: sideBySide ? 0 : pos)
+                        .allowsHitTesting(false)
+                }
+
+                handle(firstLength: firstLength, usable: usable)
+                    .position(x: sideBySide ? pos + Self.divider / 2 : geo.size.width / 2,
+                              y: sideBySide ? geo.size.height / 2 : pos + Self.divider / 2)
             }
-            .animation(.easeOut(duration: 0.25), value: sideBySide)
+            .frame(width: geo.size.width, height: geo.size.height)
         }
         .background(Color.black.ignoresSafeArea())
         .ignoresSafeArea()
@@ -82,10 +105,40 @@ struct SplitEditorView: View {
             .clipped()
     }
 
-    private func dividerBar(total: CGFloat) -> some View {
-        ZStack {
-            Rectangle().fill(Color(hex: "#1C1C1E"))
-            Menu {
+    /// The grip in the middle of the divider: drag it to resize, hold it for the options.
+    private func handle(firstLength: CGFloat, usable: CGFloat) -> some View {
+        let dragging = dragOffset != nil
+        return Capsule()
+            .fill(dragging ? Theme.action : Color(hex: "#3A3A3C"))
+            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .overlay(
+                Capsule()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: sideBySide ? 3 : 26, height: sideBySide ? 26 : 3)
+            )
+            .frame(width: sideBySide ? 14 : 64, height: sideBySide ? 64 : 14)
+            .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+            .frame(width: sideBySide ? 44 : 100, height: sideBySide ? 100 : 44)
+            .contentShape(Rectangle())
+            .scaleEffect(dragging ? 1.15 : 1)
+            .animation(.snappy(duration: 0.18), value: dragging)
+            .gesture(
+                DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                    .onChanged { v in
+                        dragOffset = sideBySide ? v.translation.width : v.translation.height
+                    }
+                    .onEnded { v in
+                        let delta = sideBySide ? v.translation.width : v.translation.height
+                        let f = Double((firstLength + delta) / usable)
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) {
+                            fraction = min(max(f, 0.2), 0.8)
+                            dragOffset = nil
+                        }
+                    }
+            )
+            .contextMenu {
                 Button {
                     let a = first
                     first = second
@@ -103,28 +156,9 @@ struct SplitEditorView: View {
                 Button(role: .destructive) { onEnd(first) } label: {
                     Label(sideBySide ? "Close Right" : "Close Bottom", systemImage: "xmark")
                 }
-            } label: {
-                Capsule()
-                    .fill(Color.white.opacity(0.55))
-                    .frame(width: sideBySide ? 5 : 56, height: sideBySide ? 56 : 5)
-                    .frame(width: sideBySide ? Self.divider + 16 : 90, height: sideBySide ? 90 : Self.divider + 16)
-                    .contentShape(Rectangle())
             }
-            .accessibilityLabel("Split screen options")
-        }
-        .frame(width: sideBySide ? Self.divider : nil, height: sideBySide ? nil : Self.divider)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 2, coordinateSpace: .global)
-                .onChanged { v in
-                    if dragStart == nil { dragStart = fraction }
-                    let delta = sideBySide ? v.translation.width : v.translation.height
-                    let f = (dragStart ?? 0.5) + Double(delta / max(total - Self.divider, 1))
-                    fraction = min(max(f, 0.25), 0.75)
-                }
-                .onEnded { _ in dragStart = nil }
-        )
-        .zIndex(2)
+            .accessibilityLabel("Split divider. Drag to resize, hold for options")
+            .zIndex(3)
     }
 }
 

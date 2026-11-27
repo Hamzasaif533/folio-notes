@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 
 /// One page: paper colour + template lines (vector layers) or an imported
 /// background, objects under the ink, Folio's own ink, and tape on top.
@@ -132,6 +133,13 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     private var dirty: Set<UUID> = []
 
     private var zoomBox: ZoomBox?
+    /// "New Page", Template, Image, Import, More: always after the last page.
+    var onEndCard: ((EndCardAction) -> Void)?
+    private lazy var endCard: UIHostingController<EndPageCard> = {
+        let h = UIHostingController(rootView: EndPageCard(onAction: { [weak self] a in self?.onEndCard?(a) }))
+        h.sizingOptions = []
+        return h
+    }()
     var onZoomBox: ((Bool) -> Void)?
 
     /// Pages fill the screen width edge to edge, with a small gap between them.
@@ -172,7 +180,12 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         for pid in notebook.pages {
             pageViews.append(makePage(pid))
         }
+        addChild(endCard)
+        endCard.view.backgroundColor = .clear
+        contentView.addSubview(endCard.view)
+        endCard.didMove(toParent: self)
         installPalmRejection()
+        installFitTap()
         installOverlays()
         refreshMode()
     }
@@ -189,6 +202,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         let lib = self.store
         pv.model.imageLoader = { [weak lib] name in lib?.loadImageAsset(name, notebookId: nbId) }
         pv.model.onSave = { [weak self] items in
+            self?.thumbs[id] = nil
             self?.store.saveElements(items, notebookId: nbId, pageId: id)
             self?.store.touch(nbId)
         }
@@ -200,6 +214,61 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         pv.ink.isUserInteractionEnabled = canvasEnabled
         contentView.addSubview(pv)
         return pv
+    }
+
+    // MARK: Double-tap to fit
+
+    private lazy var fitTap = UITapGestureRecognizer(target: self, action: #selector(fitTapped(_:)))
+    private let fitTapFilter = FitTapFilter()
+
+    /// A single-finger double tap fits the whole page on screen; again, it fits the page's width.
+    private func installFitTap() {
+        fitTap.numberOfTapsRequired = 2
+        fitTap.numberOfTouchesRequired = 1
+        fitTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        fitTap.cancelsTouchesInView = false
+        fitTapFilter.allow = { [weak self] touch in self?.fitTapAllowed(touch) ?? false }
+        fitTap.delegate = fitTapFilter
+        scrollView.addGestureRecognizer(fitTap)
+    }
+
+    private func fitTapAllowed(_ touch: UITouch) -> Bool {
+        // When fingers write, a double tap is two dots; with the text tool it's for typing.
+        if fingerDraws && canvasEnabled && !readOnly { return false }
+        if editorTool == .text && !readOnly { return false }
+        var v = touch.view
+        while let cur = v {
+            if cur is ElementView || cur is UITextView || cur is UIControl || cur === endCard.view { return false }
+            v = cur.superview
+        }
+        return true
+    }
+
+    @objc private func fitTapped(_ g: UITapGestureRecognizer) {
+        guard g.state == .recognized, !pageViews.isEmpty, !isBaking else { return }
+        let p = g.location(in: contentView)
+        let pv = pageViews.first { $0.frame.insetBy(dx: 0, dy: -Self.gapUnits * docZoom).contains(p) }
+            ?? pageViews[min(max(currentPage, 0), pageViews.count - 1)]
+        let f = pv.frame
+        let b = scrollView.bounds.size
+        guard f.width > 0, f.height > 0, b.width > 0, b.height > 24 else { return }
+        let zs = scrollView.zoomScale
+        let fitsHeight = abs(f.height * zs - (b.height - 24)) < max(6, b.height * 0.02)
+        var rect: CGRect
+        if fitsHeight {
+            // Page width across the screen, staying around where you tapped.
+            let h = f.width * b.height / b.width
+            let y = min(max(p.y - h / 2, f.minY), max(f.minY, f.maxY - h))
+            rect = CGRect(x: f.minX, y: y, width: f.width, height: h)
+        } else {
+            // The whole page top to bottom, with a little room above and below.
+            let m = 12 * f.height / (b.height - 24)
+            let h = f.height + 2 * m
+            let w = h * b.width / b.height
+            rect = CGRect(x: f.midX - w / 2, y: f.minY - m, width: w, height: h)
+        }
+        UISelectionFeedbackGenerator().selectionChanged()
+        scrollView.zoom(to: rect, animated: true)
     }
 
     // MARK: Layout & zoom
@@ -274,7 +343,10 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             along += (horizontal ? s.width : s.height) + g
             across = max(across, horizontal ? s.height : s.width)
         }
-        along = max(horizontal ? ps.width : ps.height, along - g)
+        // The New Page card after the last page keeps the same size on screen at any zoom.
+        let cardAt = along
+        let cardUnits = (horizontal ? 500 : 600) / max(z, 0.05)
+        along = max(horizontal ? ps.width : ps.height, along + cardUnits)
         pageOffsets = offsets
         let size = horizontal
             ? CGSize(width: along * z, height: across * z)
@@ -288,6 +360,10 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
                 ? CGRect(x: offsets[i] * z, y: (across - s.height) / 2 * z, width: s.width * z, height: s.height * z)
                 : CGRect(x: (across - s.width) / 2 * z, y: offsets[i] * z, width: s.width * z, height: s.height * z)
         }
+        endCard.view.frame = horizontal
+            ? CGRect(x: cardAt * z, y: 0, width: cardUnits * z, height: across * z)
+            : CGRect(x: 0, y: cardAt * z, width: across * z, height: cardUnits * z)
+        endCard.view.isHidden = readOnly
         scrollView.contentSize = size
         scrollView.minimumZoomScale = minZoom / z
         scrollView.maximumZoomScale = maxZoom / z
@@ -399,6 +475,12 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         var index = pageOffsets.indices.min { abs(pageOffsets[$0] - x) < abs(pageOffsets[$1] - x) } ?? currentPage
         if velocity.x > 0.2 { index = min(index, currentPage + 1) } else if velocity.x < -0.2 { index = max(index, currentPage - 1) }
         index = min(max(index, 0), pageOffsets.count - 1)
+        // Past the last page lies the New Page card.
+        let last = pageOffsets.count - 1
+        if currentPage == last, index == last, velocity.x > 0.2 {
+            target.pointee.x = clamped(CGPoint(x: CGFloat.greatestFiniteMagnitude, y: 0)).x
+            return
+        }
         target.pointee.x = clamped(CGPoint(x: pageOffsets[index] * docZoom - sv.contentInset.left, y: 0)).x
     }
 
@@ -443,6 +525,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     override func applyCanvasEnabled(_ enabled: Bool) {
         canvasEnabled = enabled
+        if isViewLoaded { endCard.view.isHidden = readOnly }
         // Switching the ink off lets taps reach the objects under it.
         for ink in allInk {
             ink.isUserInteractionEnabled = enabled
@@ -477,6 +560,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     }
 
     private func scheduleSave(_ pv: PageView) {
+        thumbs[pv.pageId] = nil
         dirty.insert(pv.pageId)
         saveTasks[pv.pageId]?.cancel()
         let pid = pv.pageId
@@ -671,6 +755,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             saveTasks[pv.pageId]?.cancel()
             dirty.remove(pv.pageId)
             pv.removeFromSuperview()
+            thumbs[pv.pageId] = nil
             pageViews[i] = makePage(pv.pageId)
         }
         undo.removeAllActions()
@@ -687,6 +772,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     }
 
     func applyPaper(template: PageTemplate, paper: PaperColor) {
+        thumbs.removeAll()
         notebook.template = template
         notebook.paper = paper
         if var fresh = store.notebook(notebook.id) {
@@ -726,8 +812,17 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
                                   width: width, imageLoader: imageLoader)
     }
 
+    /// Sidebar pictures of the pages, kept until a page changes (drawing them every time
+    /// the sidebar updated is what made dragging pages slow).
+    private var thumbs: [UUID: UIImage] = [:]
+
     func thumbnail(of index: Int, width: CGFloat) -> UIImage? {
-        pageImage(index, width: width * 2)
+        guard pageViews.indices.contains(index) else { return nil }
+        let id = pageViews[index].pageId
+        if let t = thumbs[id], abs(t.size.width - width * 2) < 1 { return t }
+        let img = pageImage(index, width: width * 2)
+        thumbs[id] = img
+        return img
     }
 
     /// Text typed on each page (text boxes and stickies), for search.
@@ -956,4 +1051,14 @@ final class ZoomBox: NSObject {
         ink.setDrawing(page.ink.drawing)
         strokeCount = page.ink.drawing.strokes.count
     }
+}
+
+/// Decides which touches the double-tap-to-fit gesture may use, and lets it run alongside the rest.
+private final class FitTapFilter: NSObject, UIGestureRecognizerDelegate {
+    var allow: (UITouch) -> Bool = { _ in true }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool { allow(touch) }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Apple Pencil Pro squeeze menu: two arcs around the pencil tip with tools,
 /// colours and sizes, plus undo/redo. Closes when you pick a tool, start
@@ -254,7 +255,9 @@ struct PageSidebar: View {
     @State private var query = ""
     @State private var selecting = false
     @State private var picked: Set<Int> = []
-    @State private var dropTarget: Int?
+    /// Page order shown while dragging (indexes of the real pages).
+    @State private var order: [Int] = []
+    @State private var dragging: Int?
     @State private var showRange = false
     @State private var rangeFrom = 1
     @State private var rangeTo = 1
@@ -264,7 +267,8 @@ struct PageSidebar: View {
     /// Bumped after pages move, so every thumbnail is drawn again.
     @State private var version = 0
 
-    private static let dragPrefix = "folio-page:"
+    /// What the grid shows: the live drag order when reordering, else the filtered pages.
+    private var listed: [Int] { canReorder && order.count == count ? order : shown }
 
     private var shown: [Int] {
         (0..<count).filter { i in
@@ -342,11 +346,14 @@ struct PageSidebar: View {
                             .padding(.top, 40)
                     }
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], spacing: 18) {
-                        ForEach(shown, id: \.self) { i in
-                            thumb(i)
+                        ForEach(Array(listed.enumerated()), id: \.element) { slot, i in
+                            thumb(i, slot: slot)
                         }
                     }
                     .id(version)
+                    // Letting go outside a page still finishes the move.
+                    .onDrop(of: [.text], delegate: PageReorderDrop(target: nil, order: $order, dragging: $dragging,
+                                                                   commit: commitReorder))
                     // Room for the selection ring so it isn't clipped at the edges.
                     .padding(.vertical, 10)
                     .padding(.horizontal, 7)
@@ -382,8 +389,11 @@ struct PageSidebar: View {
         }
         .onChange(of: count) { _, _ in
             picked = picked.filter { $0 < count }
+            order = Array(0..<count)
+            dragging = nil
             version += 1
         }
+        .onAppear { order = Array(0..<count) }
     }
 
     private var header: some View {
@@ -418,8 +428,8 @@ struct PageSidebar: View {
     }
 
     @ViewBuilder
-    private func thumb(_ i: Int) -> some View {
-        let base = PageThumb(index: i, template: template, paper: paper,
+    private func thumb(_ i: Int, slot: Int) -> some View {
+        let base = PageThumb(index: slot, template: template, paper: paper,
                              selected: selecting ? picked.contains(i) : i == current, image: thumbnail(i),
                              bookmarked: bookmarked(i), caption: outlineTitle(i),
                              onBookmark: { onToggleBookmark(i) },
@@ -435,14 +445,10 @@ struct PageSidebar: View {
                         .transition(.scale.combined(with: .opacity))
                 }
             }
-            .overlay(alignment: .leading) {
-                // Where a dragged page will land.
-                if dropTarget == i {
-                    Capsule().fill(Theme.action).frame(width: 4).padding(.vertical, 6).offset(x: -11)
-                }
-            }
+            .opacity(dragging == i ? 0.35 : 1)
             .id(i)
             .onTapGesture {
+                if dragging != nil { dragging = nil; order = Array(0..<count) }
                 if selecting {
                     if picked.contains(i) { picked.remove(i) } else { picked.insert(i) }
                 } else {
@@ -452,29 +458,31 @@ struct PageSidebar: View {
         if canReorder {
             base
                 .contextMenu { pageMenu(i) }
-                .draggable(Self.dragPrefix + String(i)) {
-                    PageThumb(index: i, template: template, paper: paper, selected: true, image: thumbnail(i),
-                              bookmarked: false, caption: nil, onBookmark: {}, menu: { EmptyView() })
-                        .frame(width: 120)
-                        .environment(\.colorScheme, .dark)
+                .onDrag {
+                    // A drag that was let go outside the list never finished: start from the real order.
+                    if dragging != nil { order = Array(0..<count) }
+                    dragging = i
+                    return NSItemProvider(object: "folio-page-\(i)" as NSString)
                 }
-                .dropDestination(for: String.self) { items, _ in
-                    dropTarget = nil
-                    guard let s = items.first, s.hasPrefix(Self.dragPrefix),
-                          let from = Int(s.dropFirst(Self.dragPrefix.count)), from != i, from < count else { return false }
-                    withAnimation(.snappy) {
-                        onMovePages([from], i)
-                        version += 1
-                    }
-                    return true
-                } isTargeted: { on in
-                    if on { dropTarget = i } else if dropTarget == i { dropTarget = nil }
-                }
+                .onDrop(of: [.text], delegate: PageReorderDrop(target: i, order: $order, dragging: $dragging,
+                                                               commit: commitReorder))
         } else if selecting {
             base
         } else {
             base.contextMenu { pageMenu(i) }
         }
+    }
+
+    /// The pages already shuffled while dragging; now move the page for real.
+    private func commitReorder() {
+        guard let d = dragging else { return }
+        let final = order.firstIndex(of: d) ?? d
+        dragging = nil
+        if final != d { onMovePages([d], final) }
+        // The notebook now has the new order, so the list goes back to 0, 1, 2… without animating.
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { order = Array(0..<count) }
     }
 
     private var selectionBar: some View {
@@ -708,5 +716,32 @@ struct AllNotesPanel: View {
         .frame(maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
         .environment(\.colorScheme, .dark)
+    }
+}
+/// Dragging a page in the sidebar: the other pages slide out of the way as you go,
+/// and the notebook is reordered once when you let go.
+struct PageReorderDrop: DropDelegate {
+    /// The page under the finger (nil for the space around the pages).
+    let target: Int?
+    @Binding var order: [Int]
+    @Binding var dragging: Int?
+    let commit: () -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let target, let d = dragging, d != target,
+              let from = order.firstIndex(of: d), let to = order.firstIndex(of: target) else { return }
+        withAnimation(.snappy(duration: 0.22)) {
+            order.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        }
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
+
+    func performDrop(info: DropInfo) -> Bool {
+        commit()
+        return true
     }
 }

@@ -50,6 +50,7 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
     case shapes, textBox, laser, tape, ruler, zoomBox, stickyNote, photo, camera, emoji, stickers
     case addPage, duplicatePage, bookmark, outline, readOnly, viewMode, search, allNotes
     case sharePDF, sharePNG, savePhoto
+    case timer
 
     var id: String { rawValue }
 
@@ -79,6 +80,7 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .sharePDF: return "Share Notebook as PDF"
         case .sharePNG: return "Share Page as PNG"
         case .savePhoto: return "Save Page as Photo"
+        case .timer: return "Pomodoro Timer"
         }
     }
 
@@ -106,6 +108,7 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .sharePDF: return "doc.richtext"
         case .sharePNG: return "square.and.arrow.up"
         case .savePhoto: return "photo.badge.arrow.down"
+        case .timer: return "timer"
         }
     }
 
@@ -133,6 +136,7 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .sharePDF: return "Export the whole notebook as a PDF."
         case .sharePNG: return "Share this page as an image."
         case .savePhoto: return "Save this page to your Photos."
+        case .timer: return "Focus in 25-minute sessions with short breaks in between."
         }
     }
 
@@ -161,15 +165,15 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
     case ballpoint, fountain, pencil, monoline, brush, crayon
     var id: String { rawValue }
     /// The pen types offered for the pen tool.
-    static let penKinds: [InkKind] = [.ballpoint, .fountain]
+    static let penKinds: [InkKind] = [.fountain, .ballpoint, .brush]
 
     var title: String {
         switch self {
-        case .ballpoint: return "Ballpoint"
-        case .fountain: return "Fountain"
+        case .ballpoint: return "Ball Pen"
+        case .fountain: return "Fountain Pen"
         case .pencil: return "Pencil"
         case .monoline: return "Fineliner"
-        case .brush: return "Brush"
+        case .brush: return "Brush Pen"
         case .crayon: return "Crayon"
         }
     }
@@ -196,8 +200,23 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    /// The Folio pen that draws this kind (only ballpoint and fountain are offered now).
-    var inkStyle: InkStyle { self == .fountain ? .fountain : .ballpoint }
+    /// The Folio pen that draws this kind.
+    var inkStyle: InkStyle {
+        switch self {
+        case .fountain: return .fountain
+        case .brush: return .brush
+        default: return .ballpoint
+        }
+    }
+
+    /// How each pen feels out of the box (sharpness, pressure, flatness, stabilization).
+    var defaultFeel: InkFeel {
+        switch self {
+        case .fountain: return InkFeel(tipSharpness: 0.5, pressure: 0.5, tipFlatness: 0.33, stabilization: 0.05)
+        case .brush: return InkFeel(tipSharpness: 0.7, pressure: 0.85, tipFlatness: 0, stabilization: 0.1)
+        default: return InkFeel(tipSharpness: 0.1, pressure: 0.25, tipFlatness: 0, stabilization: 0.05)
+        }
+    }
 
     var widthRange: ClosedRange<CGFloat> {
         switch self {
@@ -222,7 +241,7 @@ struct PenPreset: Codable, Identifiable, Hashable {
 
     var uiColor: UIColor { UIColor(hex: colorHex).withAlphaComponent(opacity) }
     var inkFeel: InkFeel {
-        get { feel ?? .standard }
+        get { feel ?? kind.defaultFeel }
         set { feel = newValue }
     }
 
@@ -277,6 +296,8 @@ final class ToolState: ObservableObject {
     @Published var tapeWidth: CGFloat { didSet { save() } }
     @Published var tapeQuickSizes: [CGFloat] { didSet { save() } }
     @Published var toolbarItems: [ToolbarItemKind] { didSet { save() } }
+    /// Each pen type remembers its own feel sliders.
+    @Published var penFeels: [String: InkFeel] { didSet { save() } }
     @Published var rulerActive = false
 
     static let defaultPenColors = ["#D32F2F", "#1F3BB3", "#2E6B1F"]
@@ -310,6 +331,8 @@ final class ToolState: ObservableObject {
         var toolbarItems: [String]?
         // Added in 1.5.
         var tapeQuickSizes: [CGFloat]?
+        // Added in 1.7.
+        var penFeels: [String: InkFeel]?
     }
 
     private static let key = "folio.toolstate.v1"
@@ -336,6 +359,7 @@ final class ToolState: ObservableObject {
             tapeColorHex = s.tapeColorHex ?? "#F2B8C6"
             tapeWidth = s.tapeWidth ?? 30
             tapeQuickSizes = Self.three(s.tapeQuickSizes, Self.defaultTapeSizes)
+            penFeels = s.penFeels ?? [:]
             toolbarItems = s.toolbarItems.map { $0.compactMap(ToolbarItemKind.init(rawValue:)) } ?? ToolbarItemKind.defaults
         } else {
             textColorHex = "#1C1C1E"
@@ -344,6 +368,7 @@ final class ToolState: ObservableObject {
             tapeWidth = 30
             toolbarItems = ToolbarItemKind.defaults
             tapeQuickSizes = Self.defaultTapeSizes
+            penFeels = [:]
             penQuickColors = Self.defaultPenColors
             penQuickSizes = Self.defaultPenSizes
             highlighterQuickColors = Self.defaultHighlighterColors
@@ -362,9 +387,7 @@ final class ToolState: ObservableObject {
             recentColors = []
             inputMode = .pencilOnly
         }
-        // 1.4: only ballpoint and fountain pens, and no pen-feel tuning.
         if !InkKind.penKinds.contains(pen.kind) { pen.kind = .ballpoint }
-        pen.feel = nil
         loading = false
         save()
     }
@@ -382,7 +405,7 @@ final class ToolState: ObservableObject {
                       textColorHex: textColorHex, textSize: textSize,
                       tapeColorHex: tapeColorHex, tapeWidth: tapeWidth,
                       toolbarItems: toolbarItems.map { $0.rawValue },
-                      tapeQuickSizes: tapeQuickSizes)
+                      tapeQuickSizes: tapeQuickSizes, penFeels: penFeels)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }
@@ -406,6 +429,17 @@ final class ToolState: ObservableObject {
             // These don't draw ink; the ink layer is switched off while they're active.
             return .none
         }
+    }
+
+    /// Switch pen type, keeping each type's own feel and a size that suits it.
+    func choosePen(_ kind: InkKind) {
+        guard kind != pen.kind else { return }
+        penFeels[pen.kind.rawValue] = pen.inkFeel
+        var p = pen
+        p.kind = kind
+        p.feel = penFeels[kind.rawValue]
+        p.width = min(max(p.width, kind.widthRange.lowerBound), kind.widthRange.upperBound)
+        pen = p
     }
 
     private static func three<T>(_ saved: [T]?, _ fallback: [T]) -> [T] {

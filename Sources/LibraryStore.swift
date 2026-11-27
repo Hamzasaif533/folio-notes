@@ -214,6 +214,23 @@ final class LibraryStore: ObservableObject {
         return nb
     }
 
+    /// A notebook whose pages are the pages of an imported file (shown behind the ink).
+    func importNotebook(title: String, folderId: UUID?, pages images: [UIImage]) -> Notebook? {
+        guard !images.isEmpty else { return nil }
+        let nb = createNotebook(title: title, folderId: folderId,
+                                cover: CoverStyle(paletteIndex: Int.random(in: 0..<Theme.coverPalettes.count), pattern: .plain),
+                                template: .blank, paper: .white)
+        guard let i = notebooks.firstIndex(where: { $0.id == nb.id }) else { return nil }
+        var ids = notebooks[i].pages
+        while ids.count < images.count { ids.append(UUID()) }
+        notebooks[i].pages = ids
+        persist()
+        for (k, img) in images.enumerated() {
+            saveBackground(img.scaledDown(maxSide: 2400), notebookId: nb.id, pageId: ids[k])
+        }
+        return notebooks[i]
+    }
+
     func updateNotebook(_ nb: Notebook) {
         guard let i = notebooks.firstIndex(where: { $0.id == nb.id }) else { return }
         var copy = nb

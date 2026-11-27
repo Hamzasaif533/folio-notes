@@ -8,6 +8,8 @@ enum InkStyle: UInt8 {
     case ballpoint = 0
     case fountain = 1
     case highlighter = 2
+    /// Soft brush: very pressure sensitive, pointed ends.
+    case brush = 3
 }
 
 /// One sampled point of a stroke, in page units, with the line width at that point.
@@ -242,10 +244,11 @@ struct InkPen: Equatable {
         var w: CGFloat
         switch style {
         case .fountain: w = width * max(1 - 1.2 * k + 2.1 * k * p, 0.12)
+        case .brush: w = width * max(1 - 1.5 * k + 2.6 * k * p, 0.06)
         default: w = width * max(1 - 0.56 * k + 1.12 * k * p, 0.12)
         }
         // A nib held at 45°: thin going one way, full going the other.
-        let flat = min((style == .fountain ? 0.5 : 0) + 0.4 * CGFloat(feel.tipFlatness), 0.85)
+        let flat = min(0.8 * CGFloat(feel.tipFlatness), 0.8)
         if flat > 0 { w *= 1 - flat * (1 - abs(sin(direction - .pi / 4))) }
         return w
     }

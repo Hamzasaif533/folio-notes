@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import PhotosUI
 import UniformTypeIdentifiers
 
@@ -23,6 +24,8 @@ final class EditorController: ObservableObject {
     /// Short messages from the page (e.g. "Undo" after a two-finger tap).
     @Published var messageCount = 0
     var lastMessage = ""
+    /// Buttons on the card after the last page.
+    let endCard = PassthroughSubject<EndCardAction, Never>()
 }
 
 @MainActor
@@ -98,6 +101,9 @@ struct SurfaceHost: UIViewControllerRepresentable {
                 guard ctrl.squeezePoint != nil else { return }
                 withAnimation(.easeOut(duration: 0.15)) { ctrl.squeezePoint = nil }
             }
+        }
+        (vc as? PagesViewController)?.onEndCard = { a in
+            DispatchQueue.main.async { ctrl.endCard.send(a) }
         }
         (vc as? PagesViewController)?.onZoomBox = { open in
             DispatchQueue.main.async { ctrl.zoomBoxOpen = open }
@@ -238,6 +244,8 @@ struct EditorView: View {
     @State private var showInfo = false
     @State private var showEmojiPopover = false
     @State private var showStickerPopover = false
+    @State private var showPomodoro = false
+    @State private var showPomodoroFromPill = false
     @Namespace private var toolNS
 
     private var toolsDock: ToolbarDock { BarPlace(toolsPlaceRaw).map(Self.edge) ?? ToolbarDock(rawValue: dockRaw) ?? .top }
@@ -376,8 +384,12 @@ struct EditorView: View {
         }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: FileImporter.types) { result in
             guard case .success(let url) = result else { return }
-            let images = FileImporter.pages(from: url)
-            if isCanvas { images.first.map(placePhoto) } else { addPages(images) }
+            showToast("Importing \(url.lastPathComponent)…")
+            Task { @MainActor in
+                let images = await FileImporter.pages(from: url)
+                if images.isEmpty { showToast("Couldn't open that file"); return }
+                if isCanvas { images.first.map(placePhoto) } else { addPages(images) }
+            }
         }
         .alert("Go to Page", isPresented: $showGoTo) {
             TextField("Page number", text: $goToText).keyboardType(.numberPad)
@@ -454,6 +466,16 @@ struct EditorView: View {
             toolbarPhotoItem = nil
             load(item, then: placePhoto)
         }
+        .onReceive(controller.endCard) { a in
+            switch a {
+            case .newPage: perform(.addPage)
+            case .template: perform(.chooseTemplate)
+            case .importFile: perform(.importFile)
+            case .scan: perform(.scanDocument)
+            case .camera: perform(.pageFromCamera)
+            case .image(let img): addPages([img])
+            }
+        }
         .onAppear(perform: runDemoHooks)
     }
 
@@ -497,6 +519,17 @@ struct EditorView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.leading, 14)
                 .padding(.bottom, 14)
+
+            // The Pomodoro countdown, while one is running or paused.
+            if showsToolBars {
+                PomodoroBadge(timer: Pomodoro.shared, onTap: { showPomodoroFromPill = true }, onFinish: { p in
+                    showToast(p == .focus ? "Focus session done. Take a break" : "Break's over. Time to focus")
+                })
+                .popover(isPresented: $showPomodoroFromPill) { PomodoroPanel(timer: Pomodoro.shared) }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 14)
+                .padding(.bottom, (toolsDock == .bottom || colorsDock == .bottom) ? 76 : 14)
+            }
 
             if showPageBadge && !isCanvas {
                 pageBadge
@@ -570,8 +603,58 @@ struct EditorView: View {
         .simultaneousGesture(moveGesture(bar, size: size))
     }
 
-    /// Hold a bar for a moment, then it follows your finger and stays where you let go.
-    /// Dropped near the left or right edge it stands upright.
+    /// Where a dropped bar lands: snapped flat against the nearest screen edge, upright on the
+    /// left and right edges, keeping clear of the corner buttons and of the other bar.
+    private func snapped(_ bar: BarKind, droppedAt p: CGPoint, in size: CGSize) -> (center: CGPoint, vertical: Bool) {
+        let w = size.width, h = size.height
+        let edges: [(ToolbarDock, CGFloat)] = [(.left, p.x), (.right, w - p.x), (.top, p.y), (.bottom, h - p.y)]
+        let edge = edges.min { $0.1 < $1.1 }?.0 ?? .top
+        let vertical = edge.vertical
+        let s0 = barSize(bar)
+        let sz = (s0.height > s0.width) == vertical ? s0 : CGSize(width: s0.height, height: s0.width)
+        let margin: CGFloat = 14
+        // Keeps a value inside a range, or centres it when the range is too small.
+        func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat, mid: CGFloat) -> CGFloat {
+            lo <= hi ? min(max(v, lo), hi) : mid
+        }
+        // The back/undo buttons sit top left, the notebook buttons top right, the page pill bottom left.
+        let topClear: CGFloat = w < 820 ? 66 : 8
+        let cornerW: CGFloat = 290
+        var c: CGPoint
+        switch edge {
+        case .left, .right:
+            let x = edge == .left ? margin + sz.width / 2 : w - margin - sz.width / 2
+            c = CGPoint(x: x, y: clamp(p.y, 64 + sz.height / 2, h - 64 - sz.height / 2, mid: h / 2))
+        case .top:
+            let y = topClear + sz.height / 2
+            let lo = w < 820 ? margin + sz.width / 2 : cornerW + sz.width / 2
+            let hi = w < 820 ? w - margin - sz.width / 2 : w - cornerW - sz.width / 2
+            c = CGPoint(x: clamp(p.x, lo, hi, mid: w / 2), y: y)
+        case .bottom:
+            let y = h - margin - sz.height / 2
+            c = CGPoint(x: clamp(p.x, 190 + sz.width / 2, w - margin - sz.width / 2, mid: w / 2), y: y)
+        }
+        // Don't land on top of the other bar: stack just inside it instead.
+        let other: BarKind = bar == .tools ? .colors : .tools
+        let otherShown = other == .tools ? showsToolBars : (showsToolBars && tools.tool.hasContextBar && !readOnly)
+        if otherShown {
+            let oc = center(of: other, in: size), os = barSize(other)
+            let oRect = CGRect(x: oc.x - os.width / 2, y: oc.y - os.height / 2, width: os.width, height: os.height)
+            let mine = CGRect(x: c.x - sz.width / 2, y: c.y - sz.height / 2, width: sz.width, height: sz.height)
+            if mine.insetBy(dx: -4, dy: -4).intersects(oRect) {
+                switch edge {
+                case .left: c.x = oRect.maxX + 8 + sz.width / 2
+                case .right: c.x = oRect.minX - 8 - sz.width / 2
+                case .top: c.y = oRect.maxY + 8 + sz.height / 2
+                case .bottom: c.y = oRect.minY - 8 - sz.height / 2
+                }
+            }
+        }
+        return (c, vertical)
+    }
+
+    /// Hold a bar for a moment, then it follows your finger; let go and it snaps to the nearest
+    /// edge, standing upright on the left and right.
     private func moveGesture(_ bar: BarKind, size: CGSize) -> some Gesture {
         LongPressGesture(minimumDuration: 0.35)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
@@ -594,9 +677,9 @@ struct EditorView: View {
                 barMovedAt = Date()
                 let c = center(of: bar, in: size)
                 let p = CGPoint(x: c.x + drag.translation.width, y: c.y + drag.translation.height)
-                let nearSide = p.x < 110 || p.x > size.width - 110
-                let vertical = nearSide && p.y > 140 && p.y < size.height - 140
-                let raw = BarPlace(x: p.x / max(size.width, 1), y: p.y / max(size.height, 1), vertical: vertical).raw
+                let s = snapped(bar, droppedAt: p, in: size)
+                let raw = BarPlace(x: s.center.x / max(size.width, 1), y: s.center.y / max(size.height, 1),
+                                   vertical: s.vertical).raw
                 withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                     if bar == .tools { toolsPlaceRaw = raw } else { colorsPlaceRaw = raw }
                     dragOffset = .zero
@@ -739,6 +822,11 @@ struct EditorView: View {
                             .presentationCompactAdaptation(.popover)
                             .darkPanel()
                     }
+            case .timer:
+                Button { if !barJustMoved { showPomodoro = true } } label: { PomodoroToolIcon(timer: Pomodoro.shared) }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityLabel(item.title)
+                    .popover(isPresented: $showPomodoro) { PomodoroPanel(timer: Pomodoro.shared) }
             case .ruler:
                 extraAction(item, on: tools.rulerActive) { tools.rulerActive.toggle() }
             case .readOnly:

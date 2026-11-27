@@ -344,6 +344,8 @@ struct SpectrumPicker: View {
 
 struct PenSettingsView: View {
     @EnvironmentObject var tools: ToolState
+    /// Shown inside the pen picker (which already has the title, preview and pen types).
+    var embedded = false
 
     private var sizePresets: [CGFloat] {
         let r = tools.pen.kind.widthRange
@@ -421,7 +423,7 @@ struct PenSettingsView: View {
                     VStack(spacing: 6) {
                         ForEach(tools.favorites) { fav in
                             HStack(spacing: 10) {
-                                StrokePreview(style: fav.kind.inkStyle, color: fav.uiColor, width: fav.width)
+                                StrokePreview(style: fav.kind.inkStyle, color: fav.uiColor, width: fav.width, feel: fav.inkFeel)
                                     .frame(height: 34)
                                     .onTapGesture { tools.selectFavorite(fav) }
                                 Button(role: .destructive) { withAnimation(.spring) { tools.removeFavorite(fav.id) } } label: {
@@ -437,7 +439,9 @@ struct PenSettingsView: View {
             .padding(18)
         }
         .tint(Theme.action)
-        .frame(width: 360, height: 680)
+        .frame(width: 360, height: embedded ? 640 : 680)
+        .navigationTitle(embedded ? "Pen Settings" : "")
+        .navigationBarTitleDisplayMode(.inline)
         .animation(.snappy(duration: 0.22), value: tools.pen.kind)
         .darkPanel()
     }
@@ -448,8 +452,8 @@ struct PenSettingsView: View {
             HStack {
                 label("Pen Feel")
                 Spacer()
-                if !tools.pen.inkFeel.isStandard {
-                    Button("Reset") { withAnimation(.snappy) { tools.pen.inkFeel = .standard } }
+                if tools.pen.inkFeel != tools.pen.kind.defaultFeel {
+                    Button("Reset") { withAnimation(.snappy) { tools.pen.feel = nil } }
                         .font(.caption.weight(.semibold))
                 }
             }
@@ -481,8 +485,7 @@ struct PenSettingsView: View {
     private func penTile(_ k: InkKind) -> some View {
         let selected = tools.pen.kind == k
         return Button {
-            tools.pen.kind = k
-            tools.pen.width = min(max(tools.pen.width, k.widthRange.lowerBound), k.widthRange.upperBound)
+            tools.choosePen(k)
         } label: {
             VStack(spacing: 4) {
                 PenTipIcon(kind: k, color: Color(hex: tools.pen.colorHex))

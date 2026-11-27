@@ -389,6 +389,8 @@ struct NotesGridView: View {
     @State private var selecting = false
     @State private var picked: Set<UUID> = []
     @State private var confirmBulkDelete = false
+    @State private var showImport = false
+    @State private var importing: String?
 
     private var sort: SortOrder { SortOrder(rawValue: sortRaw) ?? .modified }
 
@@ -493,7 +495,8 @@ struct NotesGridView: View {
                                     onCanvas: { pick { onNewNotebook(currentFolderId, .canvas) } },
                                     onFolder: { pick { onNewFolder(currentFolderId) } },
                                     onQuickNote: { pick { onQuickNote(.paged) } },
-                                    onQuickCanvas: { pick { onQuickNote(.canvas) } })
+                                    onQuickCanvas: { pick { onQuickNote(.canvas) } },
+                                    onImport: { pick { showImport = true } })
                         }
                 }
             }
@@ -519,6 +522,21 @@ struct NotesGridView: View {
             }
             if DemoMode.showNew {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showNewMenu = true }
+            }
+        }
+        .fileImporter(isPresented: $showImport, allowedContentTypes: FileImporter.types) { result in
+            guard case .success(let url) = result else { return }
+            importFile(url)
+        }
+        .overlay {
+            if let importing {
+                VStack(spacing: 12) {
+                    ProgressView().controlSize(.large)
+                    Text("Importing \(importing)…").font(.subheadline.weight(.medium))
+                }
+                .padding(28)
+                .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(.regularMaterial))
+                .transition(.opacity)
             }
         }
         .alert("Rename Notebook", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -548,6 +566,18 @@ struct NotesGridView: View {
             }
         } message: {
             Text("This can't be undone.")
+        }
+    }
+
+    /// A PDF, Word document or PowerPoint becomes a new notebook to write on (one page per page or slide).
+    private func importFile(_ url: URL) {
+        let title = url.deletingPathExtension().lastPathComponent
+        withAnimation { importing = title }
+        Task { @MainActor in
+            let images = await FileImporter.pages(from: url)
+            withAnimation { importing = nil }
+            guard let nb = store.importNotebook(title: title, folderId: currentFolderId, pages: images) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onOpen(nb) }
         }
     }
 
@@ -777,6 +807,7 @@ struct NewMenu: View {
     let onFolder: () -> Void
     let onQuickNote: () -> Void
     let onQuickCanvas: () -> Void
+    var onImport: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 12) {
@@ -789,6 +820,8 @@ struct NewMenu: View {
                 row("Quick Note", "square.and.pencil", onQuickNote)
                 Divider().padding(.leading, 52)
                 row("Quick Canvas", "scribble.variable", onQuickCanvas)
+                Divider().padding(.leading, 52)
+                row("Import PDF, Word or PowerPoint", "square.and.arrow.down", onImport)
             }
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.07)))
         }

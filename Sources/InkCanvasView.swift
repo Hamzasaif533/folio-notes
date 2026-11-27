@@ -325,7 +325,7 @@ final class InkCanvasView: UIView {
         if let last = points.last {
             let dx = loc.x - last.cg.x, dy = loc.y - last.cg.y
             if hypot(dx, dy) > 0.6 / ds { direction = atan2(dy, dx) }
-            if t.type != .pencil, pen.style == .fountain {
+            if t.type != .pencil, pen.style == .fountain || pen.style == .brush {
                 // Fingers have no pressure: a quick line is a thin line.
                 let dt = max(t.timestamp - lastTime, 0.001)
                 let speed = hypot(dx, dy) * ds / CGFloat(dt)
