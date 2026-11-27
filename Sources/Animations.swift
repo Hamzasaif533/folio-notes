@@ -47,4 +47,18 @@ struct StaggeredAppear: ViewModifier {
 
 extension View {
     func staggeredAppear(_ index: Int) -> some View { modifier(StaggeredAppear(index: index)) }
+
+    /// Dark popover panel (like Noteshelf's pen menu) without changing the
+    /// colour scheme of the screen underneath.
+    func darkPanel() -> some View {
+        self
+            .environment(\.colorScheme, .dark)
+            .background(Color(hex: "#2C2C2E").ignoresSafeArea())
+            .presentationBackground(Color(hex: "#2C2C2E"))
+    }
+
+    /// Solid popover background so text stays readable over colourful covers.
+    func solidPopover() -> some View {
+        self.presentationBackground(Color(uiColor: .secondarySystemGroupedBackground))
+    }
 }

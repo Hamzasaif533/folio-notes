@@ -431,7 +431,7 @@ struct PenSettingsView: View {
         .tint(Theme.action)
         .frame(width: 360, height: 680)
         .animation(.snappy(duration: 0.22), value: tools.pen.kind)
-        .preferredColorScheme(.dark)
+        .darkPanel()
     }
 
     private func penTile(_ k: InkKind) -> some View {
@@ -486,7 +486,7 @@ struct HighlighterSettingsView: View {
         .padding(18)
         .frame(width: 360)
         .tint(Theme.action)
-        .preferredColorScheme(.dark)
+        .darkPanel()
     }
 }
 
@@ -520,6 +520,6 @@ struct EraserSettingsView: View {
         .padding(18)
         .frame(width: 320)
         .tint(Theme.action)
-        .preferredColorScheme(.dark)
+        .darkPanel()
     }
 }

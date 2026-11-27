@@ -523,6 +523,7 @@ struct NewMenu: View {
         .padding(14)
         .frame(width: 380)
         .presentationCompactAdaptation(.popover)
+        .solidPopover()
     }
 
     private func tile(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
