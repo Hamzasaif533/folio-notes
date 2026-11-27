@@ -8,6 +8,7 @@ enum EditorAction {
     case sharePDF, sharePNG, savePhoto, goToPage, bookmark, outline, duplicatePage, deletePage
     case zoomBox, readOnly, info, customizeToolbar, clearCanvas, background
     case tool(EditorTool), allNotes, search
+    case splitScreen, addSpace
 }
 
 // MARK: - Dark menu building blocks (Noteshelf-style)
@@ -308,6 +309,7 @@ struct MoreMenu: View {
                                 title: bookmarked ? "Remove Bookmark" : "Bookmark Page") { onAction(.bookmark) }
                         MenuRow(icon: "list.bullet.indent", title: inOutline ? "Rename in Outline" : "Add to Outline") { onAction(.outline) }
                         MenuRow(icon: "plus.square.on.square", title: "Duplicate Page") { onAction(.duplicatePage) }
+                        MenuRow(icon: "arrow.up.left.and.arrow.down.right.rectangle", title: "Add Space to Page") { onAction(.addSpace) }
                         MenuRow(icon: "trash", title: "Delete page", destructive: true, divider: false) { onAction(.deletePage) }
                     } else {
                         MenuRow(icon: "trash", title: "Clear Canvas", destructive: true, divider: false) { onAction(.clearCanvas) }
@@ -319,7 +321,8 @@ struct MoreMenu: View {
                     if !isCanvas {
                         MenuRow(icon: "rectangle.and.text.magnifyingglass", title: "Zoom Box", on: zoomBoxOn) { onAction(.zoomBox) }
                     }
-                    MenuRow(icon: "lock", title: "Read only Mode", on: readOnly) { onAction(.readOnly) }
+                    MenuRow(icon: "book", title: "Reading Mode", on: readOnly) { onAction(.readOnly) }
+                    MenuRow(icon: "rectangle.split.2x1", title: "Split Screen") { onAction(.splitScreen) }
                     MenuRow(icon: "info.circle", title: "Get Info", chevron: true, divider: false) { onAction(.info) }
                 }
 

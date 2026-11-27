@@ -120,12 +120,16 @@ struct CoverPatternView: View {
     }
 }
 
-/// Folder shape with a tab on the top left.
+/// Folder shape with a tab on the top left. The bottom corners use the same
+/// circular radius as the glass front, so the back never peeks out at the corners.
 struct FolderShape: Shape {
+    var bottomRadius: CGFloat = 22
+
     func path(in r: CGRect) -> Path {
         let tabW = r.width * 0.4
         let tabH: CGFloat = 14
         let rad: CGFloat = 14
+        let br = min(bottomRadius, r.width / 2, (r.height - tabH) / 2)
         var p = Path()
         p.move(to: CGPoint(x: r.minX, y: r.minY + rad))
         p.addQuadCurve(to: CGPoint(x: r.minX + rad, y: r.minY), control: CGPoint(x: r.minX, y: r.minY))
@@ -134,10 +138,8 @@ struct FolderShape: Shape {
                        control: CGPoint(x: r.minX + tabW, y: r.minY))
         p.addLine(to: CGPoint(x: r.maxX - rad, y: r.minY + tabH))
         p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY + tabH + rad), control: CGPoint(x: r.maxX, y: r.minY + tabH))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - rad))
-        p.addQuadCurve(to: CGPoint(x: r.maxX - rad, y: r.maxY), control: CGPoint(x: r.maxX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX + rad, y: r.maxY))
-        p.addQuadCurve(to: CGPoint(x: r.minX, y: r.maxY - rad), control: CGPoint(x: r.minX, y: r.maxY))
+        p.addArc(tangent1End: CGPoint(x: r.maxX, y: r.maxY), tangent2End: CGPoint(x: r.minX, y: r.maxY), radius: br)
+        p.addArc(tangent1End: CGPoint(x: r.minX, y: r.maxY), tangent2End: CGPoint(x: r.minX, y: r.minY), radius: br)
         p.closeSubpath()
         return p
     }
@@ -160,8 +162,8 @@ struct FolderCard: View {
             ZStack(alignment: .bottom) {
                 // Back of the folder, with the tab.
                 FolderShape()
-                    .fill(LinearGradient(colors: [base.opacity(scheme == .dark ? 0.34 : 0.24),
-                                                  base.opacity(scheme == .dark ? 0.16 : 0.10)],
+                    .fill(LinearGradient(colors: [base.opacity(scheme == .dark ? 0.50 : 0.40),
+                                                  base.opacity(scheme == .dark ? 0.30 : 0.22)],
                                          startPoint: .top, endPoint: .bottom))
                     .overlay(FolderShape().stroke(Color.white.opacity(scheme == .dark ? 0.14 : 0.55), lineWidth: 1))
 
@@ -170,12 +172,11 @@ struct FolderCard: View {
                     .padding(.top, 20)
 
                 // Frosted glass front.
-                let front = RoundedRectangle(cornerRadius: 22, style: .continuous)
-                // Thin, clear glass: the notebooks behind it stay easy to make out.
+                let front = RoundedRectangle(cornerRadius: 22, style: .circular)
+                // Frosted glass: blurs the notebooks behind it, tinted with the folder colour.
                 front
-                    .fill(.ultraThinMaterial)
-                    .opacity(scheme == .dark ? 0.55 : 0.5)
-                    .overlay(front.fill(base.opacity(scheme == .dark ? 0.12 : 0.07)))
+                    .fill(.thinMaterial)
+                    .overlay(front.fill(base.opacity(scheme == .dark ? 0.22 : 0.16)))
                     .overlay(front.fill(LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.08 : 0.28),
                                                                 Color.white.opacity(0.0)],
                                                        startPoint: .top, endPoint: .bottom)))

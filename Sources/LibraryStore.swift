@@ -412,6 +412,46 @@ final class LibraryStore: ObservableObject {
         let new = UUID()
         copyPageFiles(from: notebookId, page: pageId, to: notebookId, page: new)
         notebooks[i].pages.insert(new, at: at + 1)
+        if let e = notebooks[i].pageExtents?[pageId.uuidString] { notebooks[i].pageExtents?[new.uuidString] = e }
+        notebooks[i].modifiedAt = Date()
+        persist()
+        return new
+    }
+
+    /// Adds space around pages. When space goes on the top or left, the ink and objects move
+    /// with the original page so nothing shifts on the paper.
+    func addSpace(notebookId: UUID, pageIds: [UUID], add: PageExtent) {
+        guard let i = notebooks.firstIndex(where: { $0.id == notebookId }) else { return }
+        var map = notebooks[i].pageExtents ?? [:]
+        for pid in pageIds {
+            map[pid.uuidString] = (map[pid.uuidString] ?? .zero) + add
+            guard add.left != 0 || add.top != 0 else { continue }
+            let t = CGAffineTransform(translationX: add.left, y: add.top)
+            saveDrawing(loadDrawing(notebookId: notebookId, pageId: pid).transformed(using: t),
+                        notebookId: notebookId, pageId: pid)
+            var elements = loadElements(notebookId: notebookId, pageId: pid)
+            for k in elements.indices {
+                elements[k].x += add.left
+                elements[k].y += add.top
+            }
+            saveElements(elements, notebookId: notebookId, pageId: pid)
+        }
+        notebooks[i].pageExtents = map
+        notebooks[i].modifiedAt = Date()
+        persist()
+    }
+
+    /// Pastes a copy of a page (from any notebook) into a notebook at `index`.
+    func copyPage(from srcNb: UUID, pageId: UUID, into dstNb: UUID, at index: Int) -> UUID? {
+        guard let i = notebooks.firstIndex(where: { $0.id == dstNb }) else { return nil }
+        let new = UUID()
+        copyPageFiles(from: srcNb, page: pageId, to: dstNb, page: new)
+        notebooks[i].pages.insert(new, at: max(0, min(index, notebooks[i].pages.count)))
+        if let e = notebook(srcNb)?.pageExtents?[pageId.uuidString] {
+            var m = notebooks[i].pageExtents ?? [:]
+            m[new.uuidString] = e
+            notebooks[i].pageExtents = m
+        }
         notebooks[i].modifiedAt = Date()
         persist()
         return new

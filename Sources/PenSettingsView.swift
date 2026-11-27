@@ -362,12 +362,12 @@ struct PenSettingsView: View {
                     .frame(height: 76)
 
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
-                    ForEach(InkKind.allCases) { k in
+                    ForEach(InkKind.penKinds) { k in
                         penTile(k)
                     }
                 }
 
-                feelSection
+                // Pen feel tuning was removed in 1.4.
 
                 HStack {
                     label("Thickness")

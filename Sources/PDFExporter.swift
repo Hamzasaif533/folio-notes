@@ -16,7 +16,8 @@ enum PDFExporter {
         do {
             try renderer.writePDF(to: url) { ctx in
                 for page in pages {
-                    ctx.beginPage()
+                    // Pages with added space get a bigger PDF page.
+                    ctx.beginPage(withBounds: CGRect(origin: .zero, size: page.extent.size), pageInfo: [:])
                     PageRenderer.draw(page, template: template, paper: paper, in: ctx.cgContext, imageLoader: imageLoader)
                 }
             }

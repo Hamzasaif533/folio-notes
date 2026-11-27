@@ -15,7 +15,7 @@ enum EditorTool: String, Codable {
     /// Tools that put PencilKit ink on the page.
     var inks: Bool { self == .pen || self == .highlighter || self == .shapes }
     /// Tools that have a colour/size bar.
-    var hasContextBar: Bool { self == .pen || self == .highlighter || self == .eraser || self == .shapes || self == .text }
+    var hasContextBar: Bool { self == .pen || self == .highlighter || self == .eraser || self == .shapes || self == .text || self == .tape }
 
     var symbol: String {
         switch self {
@@ -73,7 +73,7 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .duplicatePage: return "Duplicate Page"
         case .bookmark: return "Bookmark"
         case .outline: return "Add to Outline"
-        case .readOnly: return "Read only Mode"
+        case .readOnly: return "Reading Mode"
         case .viewMode: return "View Mode"
         case .search: return "Search"
         case .allNotes: return "Recent Notebooks"
@@ -100,7 +100,7 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .duplicatePage: return "plus.square.on.square"
         case .bookmark: return "bookmark"
         case .outline: return "list.bullet.indent"
-        case .readOnly: return "lock"
+        case .readOnly: return "book"
         case .viewMode: return "rectangle.split.2x1"
         case .search: return "magnifyingglass"
         case .allNotes: return "clock.arrow.circlepath"
@@ -161,6 +161,8 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
 enum InkKind: String, Codable, CaseIterable, Identifiable {
     case ballpoint, fountain, pencil, monoline, brush, crayon
     var id: String { rawValue }
+    /// The pen types offered for the pen tool.
+    static let penKinds: [InkKind] = [.ballpoint, .fountain]
 
     var title: String {
         switch self {
@@ -280,6 +282,8 @@ final class ToolState: ObservableObject {
     @Published var eraserQuickSizes: [CGFloat] { didSet { save() } }
     @Published var textColorHex: String { didSet { save() } }
     @Published var textSize: CGFloat { didSet { save() } }
+    @Published var tapeColorHex: String { didSet { save() } }
+    @Published var tapeWidth: CGFloat { didSet { save() } }
     @Published var toolbarItems: [ToolbarItemKind] { didSet { save() } }
     @Published var rulerActive = false
 
@@ -308,6 +312,8 @@ final class ToolState: ObservableObject {
         // Added in 1.3.
         var textColorHex: String?
         var textSize: CGFloat?
+        var tapeColorHex: String?
+        var tapeWidth: CGFloat?
         var toolbarItems: [String]?
     }
 
@@ -332,10 +338,14 @@ final class ToolState: ObservableObject {
             eraserQuickSizes = Self.three(s.eraserQuickSizes, Self.defaultEraserSizes)
             textColorHex = s.textColorHex ?? "#1C1C1E"
             textSize = s.textSize ?? 22
+            tapeColorHex = s.tapeColorHex ?? "#F2B8C6"
+            tapeWidth = s.tapeWidth ?? 30
             toolbarItems = s.toolbarItems.map { $0.compactMap(ToolbarItemKind.init(rawValue:)) } ?? ToolbarItemKind.defaults
         } else {
             textColorHex = "#1C1C1E"
             textSize = 22
+            tapeColorHex = "#F2B8C6"
+            tapeWidth = 30
             toolbarItems = ToolbarItemKind.defaults
             penQuickColors = Self.defaultPenColors
             penQuickSizes = Self.defaultPenSizes
@@ -355,6 +365,9 @@ final class ToolState: ObservableObject {
             recentColors = []
             inputMode = .pencilOnly
         }
+        // 1.4: only ballpoint and fountain pens, and no pen-feel tuning.
+        if !InkKind.penKinds.contains(pen.kind) { pen.kind = .ballpoint }
+        pen.feel = nil
         loading = false
         save()
     }
@@ -370,6 +383,7 @@ final class ToolState: ObservableObject {
                       eraserQuickSizes: eraserQuickSizes,
                       palmMigrated: true,
                       textColorHex: textColorHex, textSize: textSize,
+                      tapeColorHex: tapeColorHex, tapeWidth: tapeWidth,
                       toolbarItems: toolbarItems.map(\.rawValue))
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
@@ -396,7 +410,7 @@ final class ToolState: ObservableObject {
     }
 
     private static func three<T>(_ saved: [T]?, _ fallback: [T]) -> [T] {
-        guard let saved, saved.count == 3 else { return fallback }
+        guard let saved, !saved.isEmpty else { return fallback }
         return saved
     }
 

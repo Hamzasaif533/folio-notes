@@ -22,6 +22,9 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     private(set) var readOnly = false
     var textColorHex = "#1C1C1E"
     var textSize: CGFloat = 22
+    var tapeColorHex = "#F2B8C6" { didSet { tapePreview.fillColor = UIColor(hex: tapeColorHex).withAlphaComponent(0.6).cgColor } }
+    /// Tape thickness in page units.
+    var tapeWidth: CGFloat = 30
 
     var onPageChanged: ((Int, Int) -> Void)?
     var onUndoChanged: ((Bool, Bool) -> Void)?
@@ -32,6 +35,12 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     var onMessage: ((String) -> Void)?
 
     private let palmBlocker = PalmGestureRecognizer()
+    private lazy var undoTap = UITapGestureRecognizer(target: self, action: #selector(fingerUndo))
+    private lazy var redoTap = UITapGestureRecognizer(target: self, action: #selector(fingerRedo))
+    private lazy var splitTap = UITapGestureRecognizer(target: self, action: #selector(fiveFingerTap))
+    var onFiveFingerTap: (() -> Void)?
+    /// Pinch-zoom switched off from the zoom menu.
+    var zoomLocked = false { didSet { updateFingerScrolling() } }
     private var pencilNearby = false
     private var hoverEndWork: DispatchWorkItem?
     private var toolInUse = false
@@ -79,6 +88,16 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         textTap.isEnabled = false
         view.addGestureRecognizer(textTap)
 
+        // Two-finger tap undoes, three-finger tap redoes (fingers only).
+        for (g, n) in [(undoTap, 2), (redoTap, 3), (splitTap, 5)] {
+            g.numberOfTouchesRequired = n
+            g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            g.cancelsTouchesInView = false
+            g.delegate = self
+            view.addGestureRecognizer(g)
+        }
+        undoTap.require(toFail: redoTap)
+
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(undoStateChanged), name: .NSUndoManagerDidCloseUndoGroup, object: undo)
         nc.addObserver(self, selector: #selector(undoStateChanged), name: .NSUndoManagerDidUndoChange, object: undo)
@@ -91,7 +110,7 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         laser.frame = view.bounds
         laser.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(laser)
-        tapePreview.fillColor = UIColor(hex: "#F2B8C6").withAlphaComponent(0.6).cgColor
+        tapePreview.fillColor = UIColor(hex: tapeColorHex).withAlphaComponent(0.6).cgColor
         tapePreview.strokeColor = nil
         laser.layer.addSublayer(tapePreview)
     }
@@ -149,11 +168,12 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         let t = editorTool
         let canvasTool = t == .pen || t == .highlighter || t == .eraser || t == .lasso || t == .shapes
         applyCanvasEnabled(canvasTool && !readOnly)
-        laserPress.isEnabled = t == .laser
+        laserPress.isEnabled = t == .laser && !readOnly
         tapePress.isEnabled = t == .tape && !readOnly
         textTap.isEnabled = t == .text && !readOnly
         for l in allObjectLayers { l.editing = t == .text && !readOnly }
         updateTouchTypes()
+        updateScrollTouches()
     }
 
     var fingerDraws: Bool {
@@ -169,13 +189,18 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         applyDrawingPolicy(fingerDraws: finger)
         updateTouchTypes()
         guard let sv = scrollingView else { return }
+        updateScrollTouches()
+    }
+
+    /// Normally the Pencil only writes and fingers scroll. In reading mode the Pencil scrolls too.
+    func updateScrollTouches() {
+        guard let sv = scrollingView else { return }
         // When the finger draws, scroll with two fingers instead.
-        sv.panGestureRecognizer.minimumNumberOfTouches = finger ? 2 : 1
-        // The Pencil only ever writes; only fingers (or a trackpad) scroll.
-        sv.panGestureRecognizer.allowedTouchTypes = [
-            NSNumber(value: UITouch.TouchType.direct.rawValue),
-            NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)
-        ]
+        sv.panGestureRecognizer.minimumNumberOfTouches = (fingerDraws && !readOnly) ? 2 : 1
+        var types = [NSNumber(value: UITouch.TouchType.direct.rawValue),
+                     NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        if readOnly { types.append(NSNumber(value: UITouch.TouchType.pencil.rawValue)) }
+        sv.panGestureRecognizer.allowedTouchTypes = types
         updateFingerScrolling()
     }
 
@@ -256,9 +281,11 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
 
     func updateFingerScrolling() {
         guard let sv = scrollingView else { return }
-        let block = ((toolInUse || pencilNearby) && !fingerDraws) || touchingObject
+        // A hovering or writing Pencil stops a resting palm from scrolling (not in reading mode).
+        let block = ((toolInUse || pencilNearby) && !fingerDraws && !readOnly) || touchingObject
         sv.panGestureRecognizer.isEnabled = !block
-        sv.pinchGestureRecognizer?.isEnabled = !block
+        // Pinch stays available while the Pencil hovers: turning it off then made zoom feel unresponsive.
+        sv.pinchGestureRecognizer?.isEnabled = !touchingObject && !zoomLocked
     }
 
     // MARK: Pen feel & shapes
@@ -332,16 +359,16 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
             let a = layer.unitPoint(view.convert(r.origin, to: layer))
             let b = layer.unitPoint(view.convert(CGPoint(x: r.maxX, y: r.maxY), to: layer))
             let e = PageElement(kind: .tape, x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y,
-                                colorHex: ElementView.softColors[Int.random(in: 0..<ElementView.softColors.count)])
+                                colorHex: tapeColorHex)
             layer.model.add(e)
             tapeLayer = nil
         }
     }
 
-    /// A strip of tape along the drag (horizontal or vertical), 30 page units thick.
+    /// A strip of tape along the drag (horizontal or vertical), `tapeWidth` page units thick.
     private func tapeRect(from a: CGPoint, to b: CGPoint, scale: CGFloat) -> CGRect? {
         let dx = b.x - a.x, dy = b.y - a.y
-        let thick = 30 * scale
+        let thick = tapeWidth * scale
         guard max(abs(dx), abs(dy)) > 12 * scale else { return nil }
         if abs(dx) >= abs(dy) {
             return CGRect(x: min(a.x, b.x), y: a.y - thick / 2, width: abs(dx), height: thick)
@@ -406,6 +433,20 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
 
     func performUndo() { if undo.canUndo { undo.undo() } }
     func performRedo() { if undo.canRedo { undo.redo() } }
+
+    @objc private func fiveFingerTap() { onFiveFingerTap?() }
+
+    @objc private func fingerUndo() {
+        guard !readOnly, undo.canUndo else { return }
+        undo.undo()
+        onMessage?("Undo")
+    }
+
+    @objc private func fingerRedo() {
+        guard !readOnly, undo.canRedo else { return }
+        undo.redo()
+        onMessage?("Redo")
+    }
 
     @objc private func appWillResign() { saveAll() }
 }

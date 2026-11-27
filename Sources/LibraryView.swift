@@ -43,7 +43,7 @@ struct LibraryView: View {
         .fullScreenCover(item: $openNotebook) { nb in
             // No zoom transition here: on iPadOS 18+ it lets a pinch or swipe
             // close the notebook. Only the back arrow leaves the editor.
-            EditorView(notebook: nb, onSwitch: { other in switchNotebook(to: other) })
+            EditorRoot(start: nb, onSwitch: { other in switchNotebook(to: other) })
                 .id(nb.id)
                 .environmentObject(store)
                 .environmentObject(tools)
@@ -124,6 +124,7 @@ struct SidebarView: View {
     let onDeleteFolder: (Folder) -> Void
     var onNewSubfolder: (UUID) -> Void = { _ in }
     @State private var foldersExpanded = true
+    @AppStorage("folio.openFolders") private var openFoldersRaw = ""
 
     var body: some View {
         ScrollView {
@@ -178,9 +179,9 @@ struct SidebarView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    ForEach(store.folderTree(), id: \.folder.id) { item in
+                    ForEach(visibleTree, id: \.folder.id) { item in
                         folderRow(item.folder, depth: item.depth)
-                            .transition(.move(edge: .leading).combined(with: .opacity))
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
             }
@@ -221,38 +222,83 @@ struct SidebarView: View {
         .buttonStyle(PressableStyle(scale: 0.95))
     }
 
+    /// Folders whose parents are all open in the sidebar.
+    private var visibleTree: [(folder: Folder, depth: Int)] {
+        let open = openFolders
+        return store.folderTree().filter { item in
+            var p = item.folder.parentId
+            var guardCount = 0
+            while let id = p, guardCount < 32 {
+                if !open.contains(id) { return false }
+                p = store.folder(id)?.parentId
+                guardCount += 1
+            }
+            return true
+        }
+    }
+
+    private var openFolders: Set<UUID> {
+        Set(openFoldersRaw.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+    }
+
+    private func toggleOpen(_ id: UUID) {
+        var s = openFolders
+        if s.contains(id) { s.remove(id) } else { s.insert(id) }
+        withAnimation(.easeOut(duration: 0.22)) {
+            openFoldersRaw = s.map(\.uuidString).joined(separator: ",")
+        }
+    }
+
     private func folderRow(_ f: Folder, depth: Int) -> some View {
         let selected = selection == .folder(f.id)
         let color = Color(hex: Theme.folderColors[abs(f.colorIndex) % Theme.folderColors.count])
-        return Button { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } } label: {
-            HStack(spacing: 12) {
-                if depth > 0 {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, CGFloat(depth - 1) * 18)
-                }
-                Image(systemName: f.icon)
-                    .font(.system(size: depth > 0 ? 12 : 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: depth > 0 ? 26 : 30, height: depth > 0 ? 26 : 30)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(color))
-                Text(f.name)
-                    .font(.system(size: depth > 0 ? 16 : 17))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Spacer()
-                Text("\(store.notebookCount(inTree: f.id))")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        let subs = store.subfolders(of: f.id).count
+        let notes = store.notebookCount(inTree: f.id)
+        let isOpen = openFolders.contains(f.id)
+        var detail: [String] = []
+        if subs > 0 { detail.append(subs == 1 ? "1 folder" : "\(subs) folders") }
+        detail.append(notes == 1 ? "1 notebook" : "\(notes) notebooks")
+        return HStack(spacing: 6) {
+            // Open / close this folder's submenu.
+            Button { toggleOpen(f.id) } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(subs > 0 ? Color.secondary : Color.clear)
+                    .rotationEffect(.degrees(isOpen ? 90 : 0))
+                    .frame(width: 22, height: 36)
+                    .contentShape(Rectangle())
             }
-            .padding(.vertical, 7)
-            .padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(selected ? Theme.accent.opacity(0.22) : Color.clear))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .disabled(subs == 0)
+
+            Button { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } } label: {
+                HStack(spacing: 11) {
+                    Image(systemName: f.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 28)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(color))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(f.name)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text(detail.joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? Theme.accent.opacity(0.22) : Color.clear))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
+        .padding(.leading, CGFloat(depth) * 18)
         .contextMenu {
             FolderMenu(store: store, folder: f, onEdit: onEditFolder, onDelete: onDeleteFolder, onNewSubfolder: onNewSubfolder)
         }
@@ -306,6 +352,9 @@ struct NotesGridView: View {
     @State private var renameText = ""
     @State private var deletingForever: Notebook?
     @State private var confirmEmptyTrash = false
+    @State private var selecting = false
+    @State private var picked: Set<UUID> = []
+    @State private var confirmBulkDelete = false
 
     private var sort: SortOrder { SortOrder(rawValue: sortRaw) ?? .modified }
 
@@ -353,7 +402,7 @@ struct NotesGridView: View {
 
                 Group {
                     if selection == .folders && query.isEmpty {
-                        foldersGrid(parent: nil)
+                        if store.subfolders(of: nil).isEmpty { emptyState } else { foldersGrid(parent: nil) }
                     } else if let id = currentFolderId {
                         let hasSubfolders = !store.subfolders(of: id).isEmpty
                         if query.isEmpty {
@@ -381,8 +430,22 @@ struct NotesGridView: View {
         }
         .background(Theme.libraryBackground.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom) {
+            if selecting { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
+        }
+        .animation(.easeOut(duration: 0.22), value: selecting)
+        .onChange(of: selection) { _, _ in selecting = false; picked = [] }
         .searchable(text: $query, prompt: "Search notes")
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if selection != .folders && !items.isEmpty || selecting {
+                    Button(selecting ? "Done" : "Select") {
+                        selecting.toggle()
+                        picked = []
+                    }
+                    .fontWeight(selecting ? .semibold : .regular)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 if selection == .trash {
                     Button("Empty Trash", role: .destructive) { confirmEmptyTrash = true }
@@ -416,6 +479,10 @@ struct NotesGridView: View {
             }
         }
         .onAppear {
+            if DemoMode.selectMode {
+                selecting = true
+                picked = Set(items.prefix(3).map(\.id))
+            }
             if DemoMode.showNew {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showNewMenu = true }
             }
@@ -462,9 +529,15 @@ struct NotesGridView: View {
                   alignment: .leading, spacing: 36) {
             ForEach(Array(items.enumerated()), id: \.element.id) { i, nb in
                 Button {
-                    if !nb.isTrashed { onOpen(nb) }
+                    if selecting {
+                        if picked.contains(nb.id) { picked.remove(nb.id) } else { picked.insert(nb.id) }
+                    } else if !nb.isTrashed { onOpen(nb) }
                 } label: {
                     NotebookTile(notebook: nb, zoomNS: zoomNS)
+                        .overlay(alignment: .topLeading) {
+                            if selecting { checkmark(picked.contains(nb.id)) }
+                        }
+                        .opacity(selecting && !picked.contains(nb.id) ? 0.75 : 1)
                 }
                 .buttonStyle(PressableStyle(scale: 0.95))
                 .contextMenu { menu(for: nb) }
@@ -513,20 +586,83 @@ struct NotesGridView: View {
                 }
                 .staggeredAppear(i)
             }
-            Button { onNewFolder(parent) } label: {
-                VStack(spacing: 10) {
-                    Image(systemName: "folder.badge.plus").font(.system(size: compact ? 28 : 34, weight: .light))
-                    Text(parent == nil ? "New Folder" : "New Folder Here").font(.subheadline.weight(.medium))
-                }
-                .foregroundStyle(Theme.action)
-                .frame(maxWidth: .infinity)
-                .frame(height: compact ? 130 : 170)
-                .background(RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Theme.action.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
-            }
-            .buttonStyle(PressableStyle(scale: 0.95))
         }
     }
+    private func checkmark(_ on: Bool) -> some View {
+        Image(systemName: on ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 24, weight: .semibold))
+            .foregroundStyle(on ? Color.white : Color.white.opacity(0.9), on ? Theme.action : Color.black.opacity(0.3))
+            .symbolRenderingMode(.palette)
+            .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+            .padding(8)
+    }
+
+    /// Bottom bar while selecting notebooks: move or delete them together.
+    private var selectionBar: some View {
+        let ids = items.map(\.id).filter { picked.contains($0) }
+        let none = ids.isEmpty
+        return HStack(spacing: 18) {
+            Button(picked.count == items.count && !items.isEmpty ? "Deselect All" : "Select All") {
+                picked = picked.count == items.count ? [] : Set(items.map(\.id))
+            }
+            Text(none ? "Select notebooks" : "\(ids.count) selected")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+            if selection == .trash {
+                Button { ids.forEach { store.restore($0) }; finishSelecting() } label: {
+                    Label("Restore", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(none)
+                Button(role: .destructive) { confirmBulkDelete = true } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(none)
+            } else {
+                Menu {
+                    Button("Unfiled") { ids.forEach { store.moveNotebook($0, to: nil) }; finishSelecting() }
+                    ForEach(store.folderTree(), id: \.folder.id) { item in
+                        Button(String(repeating: "   ", count: item.depth) + item.folder.name) {
+                            ids.forEach { store.moveNotebook($0, to: item.folder.id) }
+                            finishSelecting()
+                        }
+                    }
+                } label: {
+                    Label("Move", systemImage: "folder")
+                }
+                .disabled(none)
+                Button(role: .destructive) { ids.forEach { store.moveToTrash($0) }; finishSelecting() } label: {
+                    Label("Trash", systemImage: "trash")
+                }
+                .disabled(none)
+            }
+        }
+        .labelStyle(.titleAndIcon)
+        .font(.body.weight(.medium))
+        .tint(Theme.action)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .glassBackground(Capsule())
+        .padding(.horizontal, 32)
+        .padding(.bottom, 12)
+        .confirmationDialog("Delete \(ids.count) notebooks forever?", isPresented: $confirmBulkDelete,
+                            titleVisibility: .visible) {
+            Button("Delete Forever", role: .destructive) {
+                ids.forEach { store.deleteNotebook($0) }
+                finishSelecting()
+            }
+        } message: {
+            Text("This can't be undone.")
+        }
+    }
+
+    private func finishSelecting() {
+        withAnimation(.easeOut(duration: 0.22)) {
+            picked = []
+            selecting = false
+        }
+    }
+
     private var emptyState: some View {
         VStack(spacing: 14) {
             Image(systemName: selection == .trash ? "trash" : (selection == .starred ? "star" : "book.closed"))
@@ -535,15 +671,6 @@ struct NotesGridView: View {
             Text(emptyText)
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            if selection != .trash && selection != .starred && query.isEmpty {
-                Button {
-                    onNewNotebook(currentFolderId, .paged)
-                } label: {
-                    Label("New Notebook", systemImage: "plus").fontWeight(.semibold)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.action)
-            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 120)
@@ -554,7 +681,8 @@ struct NotesGridView: View {
         switch selection {
         case .trash: return "Trash is empty"
         case .starred: return "Star a notebook to see it here"
-        default: return "No notebooks yet"
+        case .folders: return "No folders"
+        default: return "No notebooks"
         }
     }
 

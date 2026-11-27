@@ -12,6 +12,10 @@ final class PageView: UIView {
     let over: ElementsLayer
     private var templateLayers: [CAShapeLayer] = []
     private(set) var zoom: CGFloat = 1
+    /// Space added around this page (Add Space to Page).
+    var extent: PageExtent = .zero
+    /// The page's size in page units, including added space.
+    var unitSize: CGSize { extent.size }
 
     var template: PageTemplate { didSet { rebuildTemplate() } }
     var paper: PaperColor { didSet { rebuildTemplate() } }
@@ -73,8 +77,7 @@ final class PageView: UIView {
     /// render natively at that size (no stretched bitmaps, so nothing goes blurry).
     func apply(zoom z: CGFloat) {
         zoom = z
-        let size = CGSize(width: TemplateRenderer.pageSize.width * z,
-                          height: TemplateRenderer.pageSize.height * z)
+        let size = CGSize(width: unitSize.width * z, height: unitSize.height * z)
         let rect = CGRect(origin: .zero, size: size)
         canvas.frame = rect
         // Lock the page canvas to exactly this zoom. With the minimum equal to
@@ -88,7 +91,8 @@ final class PageView: UIView {
         canvas.panGestureRecognizer.isEnabled = false
         canvas.contentSize = size
         canvas.contentOffset = .zero
-        backgroundView.frame = rect
+        let o = extent.originalRect
+        backgroundView.frame = CGRect(x: o.minX * z, y: o.minY * z, width: o.width * z, height: o.height * z)
         for l in [under, over] {
             l.frame = rect
             l.scale = z
@@ -108,11 +112,9 @@ final class PageView: UIView {
         // Imported pages (photos, scans, PDFs) show the page itself instead of lines.
         if background == nil {
             let scale = window?.screen.scale ?? UIScreen.main.scale
-            templateLayers = TemplateRenderer.layers(template: template, paper: paper, scale: zoom).map { l in
+            templateLayers = TemplateRenderer.layers(template: template, paper: paper, scale: zoom, size: unitSize).map { l in
                 let s = CAShapeLayer()
-                s.frame = CGRect(x: 0, y: 0,
-                                 width: TemplateRenderer.pageSize.width * zoom,
-                                 height: TemplateRenderer.pageSize.height * zoom)
+                s.frame = CGRect(x: 0, y: 0, width: unitSize.width * zoom, height: unitSize.height * zoom)
                 s.contentsScale = scale
                 s.path = l.path
                 if l.filled {
@@ -131,7 +133,7 @@ final class PageView: UIView {
     }
 
     var content: PageContent {
-        PageContent(drawing: canvas.drawing, elements: model.items, background: background)
+        PageContent(drawing: canvas.drawing, elements: model.items, background: background, extent: extent)
     }
 }
 
@@ -160,8 +162,9 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     /// Pages fill the screen width edge to edge, with a small gap between them.
     static let gapUnits: CGFloat = 14
-    private var minZoom: CGFloat { fitZoom * 0.5 }
-    private var maxZoom: CGFloat { fitZoom * 4 }
+    // 20% to 600% of the page fitting the screen.
+    private var minZoom: CGFloat { fitZoom * 0.2 }
+    private var maxZoom: CGFloat { fitZoom * 6 }
 
     override var scrollingView: UIScrollView? { scrollView }
     var currentPageId: UUID? { pageViews.indices.contains(currentPage) ? pageViews[currentPage].pageId : nil }
@@ -187,8 +190,8 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         scrollView.alwaysBounceVertical = !horizontal
         scrollView.alwaysBounceHorizontal = horizontal
         // Real values are set in layoutPages; set early so the pinch recogniser exists for palm rejection.
-        scrollView.minimumZoomScale = 0.5
-        scrollView.maximumZoomScale = 4
+        scrollView.minimumZoomScale = 0.2
+        scrollView.maximumZoomScale = 6
         view.addSubview(scrollView)
         scrollView.addSubview(contentView)
 
@@ -206,6 +209,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
                           drawing: store.loadDrawing(notebookId: nbId, pageId: id),
                           elements: store.loadElements(notebookId: nbId, pageId: id),
                           background: store.loadBackground(notebookId: nbId, pageId: id))
+        pv.extent = notebook.extent(id)
         pv.canvas.delegate = canvasDelegate
         pv.canvas.tool = tool
         pv.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
@@ -282,24 +286,36 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         return (horizontal ? ps.width : ps.height) + Self.gapUnits
     }
 
+    /// Where each page starts along the scrolling direction, in page units.
+    /// Pages can differ in size once space has been added to them.
+    private var pageOffsets: [CGFloat] = []
+
     private func layoutPages() {
         let z = docZoom
         let ps = TemplateRenderer.pageSize
-        let g = Self.gapUnits * z
-        let pw = ps.width * z
-        let ph = ps.height * z
-        let n = CGFloat(pageViews.count)
+        let g = Self.gapUnits
+        var offsets: [CGFloat] = []
+        var along: CGFloat = 0
+        var across: CGFloat = horizontal ? ps.height : ps.width
+        for pv in pageViews {
+            let s = pv.unitSize
+            offsets.append(along)
+            along += (horizontal ? s.width : s.height) + g
+            across = max(across, horizontal ? s.height : s.width)
+        }
+        along = max(horizontal ? ps.width : ps.height, along - g)
+        pageOffsets = offsets
         let size = horizontal
-            ? CGSize(width: max(pw, n * (pw + g) - g), height: ph)
-            : CGSize(width: pw, height: max(ph, n * (ph + g) - g))
+            ? CGSize(width: along * z, height: across * z)
+            : CGSize(width: across * z, height: along * z)
 
         contentView.transform = .identity
         contentView.frame = CGRect(origin: .zero, size: size)
         for (i, pv) in pageViews.enumerated() {
-            let o = CGFloat(i)
+            let s = pv.unitSize
             pv.frame = horizontal
-                ? CGRect(x: o * (pw + g), y: 0, width: pw, height: ph)
-                : CGRect(x: 0, y: o * (ph + g), width: pw, height: ph)
+                ? CGRect(x: offsets[i] * z, y: (across - s.height) / 2 * z, width: s.width * z, height: s.height * z)
+                : CGRect(x: (across - s.width) / 2 * z, y: offsets[i] * z, width: s.width * z, height: s.height * z)
             pv.apply(zoom: z)
         }
         scrollView.contentSize = size
@@ -315,7 +331,9 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         let extra: CGFloat = zoomBox == nil ? 0 : ZoomBox.panelHeight + 40
         if horizontal {
             // Room on both sides so any page can sit in the middle of the screen.
-            let pageW = TemplateRenderer.pageSize.width * docZoom * scrollView.zoomScale
+            let unitW = pageViews.indices.contains(currentPage) ? pageViews[currentPage].unitSize.width
+                                                                 : TemplateRenderer.pageSize.width
+            let pageW = unitW * docZoom * scrollView.zoomScale
             let h = max(0, (scrollView.bounds.width - pageW) / 2)
             let vertical = max(0, (scrollView.bounds.height - cs.height) / 2)
             scrollView.contentInset = UIEdgeInsets(top: vertical, left: h, bottom: vertical + extra, right: h)
@@ -383,12 +401,12 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     func scrollViewWillEndDragging(_ sv: UIScrollView, withVelocity velocity: CGPoint,
                                    targetContentOffset target: UnsafeMutablePointer<CGPoint>) {
         guard sv === scrollView, horizontal, abs(docZoom * sv.zoomScale - fitZoom) < 0.01 else { return }
-        let step = pageStep * docZoom
-        var index = ((target.pointee.x + sv.contentInset.left) / step).rounded()
-        let current = CGFloat(currentPage)
-        if velocity.x > 0.2 { index = min(index, current + 1) } else if velocity.x < -0.2 { index = max(index, current - 1) }
-        index = min(max(index, 0), CGFloat(pageViews.count - 1))
-        target.pointee.x = clamped(CGPoint(x: index * step - sv.contentInset.left, y: 0)).x
+        guard !pageOffsets.isEmpty else { return }
+        let x = (target.pointee.x + sv.contentInset.left) / docZoom
+        var index = pageOffsets.indices.min { abs(pageOffsets[$0] - x) < abs(pageOffsets[$1] - x) } ?? currentPage
+        if velocity.x > 0.2 { index = min(index, currentPage + 1) } else if velocity.x < -0.2 { index = max(index, currentPage - 1) }
+        index = min(max(index, 0), pageOffsets.count - 1)
+        target.pointee.x = clamped(CGPoint(x: pageOffsets[index] * docZoom - sv.contentInset.left, y: 0)).x
     }
 
     private func reportPage(force: Bool) {
@@ -397,7 +415,9 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         let center = horizontal
             ? (scrollView.contentOffset.x + scrollView.bounds.width / 2) / z
             : (scrollView.contentOffset.y + scrollView.bounds.height / 2) / z
-        let idx = min(max(Int(center / pageStep), 0), pageViews.count - 1)
+        var idx = 0
+        for (i, o) in pageOffsets.enumerated() where o <= center { idx = i }
+        idx = min(max(idx, 0), pageViews.count - 1)
         if force || idx != currentPage {
             currentPage = idx
             onPageChanged?(idx, pageViews.count)
@@ -406,7 +426,8 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     func scrollTo(page: Int, animated: Bool) {
         guard pageViews.indices.contains(page) else { return }
-        let d = CGFloat(page) * pageStep * docZoom * scrollView.zoomScale
+        let start = pageOffsets.indices.contains(page) ? pageOffsets[page] : CGFloat(page) * pageStep
+        let d = start * docZoom * scrollView.zoomScale
         let p = horizontal
             ? CGPoint(x: d - scrollView.contentInset.left, y: scrollView.contentOffset.y)
             : CGPoint(x: scrollView.contentOffset.x, y: d)
@@ -495,11 +516,11 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     }
 
     /// Adds pages after the current one (imported pages get their image as the background).
-    func insertPages(count: Int, backgrounds: [UIImage]) {
+    func insertPages(count: Int, backgrounds: [UIImage], at index: Int? = nil) {
         saveAll()
         let n = max(count, backgrounds.count)
         guard n > 0 else { return }
-        var at = currentPage + 1
+        var at = max(0, min(index ?? currentPage + 1, pageViews.count))
         let first = at
         for i in 0..<n {
             guard let pid = store.insertPage(notebookId: notebook.id, at: at) else { break }
@@ -526,12 +547,14 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         onPageChanged?(currentPage, pageViews.count)
     }
 
-    func duplicateCurrentPage() {
+    func duplicateCurrentPage() { duplicatePage(at: currentPage) }
+
+    func duplicatePage(at index: Int) {
         saveAll()
-        guard let pid = currentPageId,
-              let copy = store.duplicatePage(notebookId: notebook.id, pageId: pid) else { return }
+        guard pageViews.indices.contains(index),
+              let copy = store.duplicatePage(notebookId: notebook.id, pageId: pageViews[index].pageId) else { return }
         if let fresh = store.notebook(notebook.id) { notebook = fresh }
-        let at = currentPage + 1
+        let at = index + 1
         pageViews.insert(makePage(copy), at: min(at, pageViews.count))
         layoutPages()
         scrollTo(page: at, animated: true)
@@ -539,8 +562,10 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         onPageChanged?(currentPage, pageViews.count)
     }
 
-    func deleteCurrentPage() {
-        let i = currentPage
+    func deleteCurrentPage() { deletePage(at: currentPage) }
+
+    func deletePage(at index: Int) {
+        let i = index
         guard pageViews.indices.contains(i) else { return }
         closeZoomBox()
         if pageViews.count == 1 {
@@ -566,6 +591,48 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         layoutPages()
         currentPage = min(i, pageViews.count - 1)
         scrollTo(page: currentPage, animated: false)
+        reportPage(force: true)
+    }
+
+    /// Pastes a copied page (possibly from another notebook) at `index`.
+    func pastePage(from srcNb: UUID, pageId: UUID, at index: Int) {
+        saveAll()
+        let at = max(0, min(index, pageViews.count))
+        guard let pid = store.copyPage(from: srcNb, pageId: pageId, into: notebook.id, at: at) else { return }
+        if let fresh = store.notebook(notebook.id) { notebook = fresh }
+        pageViews.insert(makePage(pid), at: at)
+        layoutPages()
+        scrollTo(page: at, animated: true)
+        reportPage(force: true)
+        onPageChanged?(currentPage, pageViews.count)
+    }
+
+    func pageId(at index: Int) -> UUID? { pageViews.indices.contains(index) ? pageViews[index].pageId : nil }
+
+    /// Size of the current page in page units (including space already added).
+    var currentPageSize: CGSize {
+        pageViews.indices.contains(currentPage) ? pageViews[currentPage].unitSize : TemplateRenderer.pageSize
+    }
+
+    /// Add Space to Page: grows the current page (or every page) by `add`.
+    func addSpace(_ add: PageExtent, allPages: Bool) {
+        guard add != .zero else { return }
+        closeZoomBox()
+        saveAll()
+        let ids = allPages ? pageViews.map { $0.pageId } : (currentPageId.map { [$0] } ?? [])
+        store.addSpace(notebookId: notebook.id, pageIds: ids, add: add)
+        if let fresh = store.notebook(notebook.id) { notebook = fresh }
+        let page = currentPage
+        for (i, pv) in pageViews.enumerated() where ids.contains(pv.pageId) {
+            saveTasks[pv.pageId]?.cancel()
+            dirty.remove(pv.pageId)
+            pv.removeFromSuperview()
+            pageViews[i] = makePage(pv.pageId)
+        }
+        undo.removeAllActions()
+        onUndoChanged?(false, false)
+        layoutPages()
+        scrollTo(page: page, animated: false)
         reportPage(force: true)
     }
 
@@ -801,9 +868,9 @@ final class ZoomBox: NSObject {
         canvas.maximumZoomScale = zoom
         canvas.zoomScale = zoom
         canvas.pinchGestureRecognizer?.isEnabled = false
-        canvas.contentSize = CGSize(width: TemplateRenderer.pageSize.width * zoom, height: TemplateRenderer.pageSize.height * zoom)
+        canvas.contentSize = CGSize(width: page.unitSize.width * zoom, height: page.unitSize.height * zoom)
         canvas.contentOffset = CGPoint(x: region.minX * zoom, y: region.minY * zoom)
-        let ps = TemplateRenderer.pageSize
+        let ps = page.unitSize
         paperImage.frame = CGRect(x: -region.minX * zoom, y: -region.minY * zoom, width: ps.width * zoom, height: ps.height * zoom)
     }
 
@@ -811,13 +878,13 @@ final class ZoomBox: NSObject {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 2.5
         format.opaque = true
-        return UIGraphicsImageRenderer(size: TemplateRenderer.pageSize, format: format).image { ctx in
-            TemplateRenderer.draw(template: page.template, paper: page.paper, in: ctx.cgContext)
+        return UIGraphicsImageRenderer(size: page.unitSize, format: format).image { ctx in
+            TemplateRenderer.draw(template: page.template, paper: page.paper, in: ctx.cgContext, size: page.unitSize)
         }
     }
 
     private func clampRegion() {
-        let ps = TemplateRenderer.pageSize
+        let ps = page.unitSize
         region.origin.x = min(max(region.minX, 0), ps.width - region.width)
         region.origin.y = min(max(region.minY, 0), ps.height - region.height)
     }
@@ -831,7 +898,7 @@ final class ZoomBox: NSObject {
 
     @objc private func left() { move(to: CGPoint(x: region.minX - region.width * 0.8, y: region.minY)) }
     @objc private func right() {
-        if region.maxX >= TemplateRenderer.pageSize.width - 1 { newLine() } else {
+        if region.maxX >= page.unitSize.width - 1 { newLine() } else {
             move(to: CGPoint(x: region.minX + region.width * 0.8, y: region.minY))
         }
     }

@@ -120,10 +120,13 @@ struct Notebook: Identifiable, Codable, Hashable {
     // Added in 1.3.
     var bookmarks: [UUID]? = nil
     var outline: [OutlineEntry]? = nil
+    // Added in 1.4: extra space added around pages (keyed by page id).
+    var pageExtents: [String: PageExtent]? = nil
 
     var isStarred: Bool { starred ?? false }
     func isBookmarked(_ page: UUID) -> Bool { bookmarks?.contains(page) ?? false }
     func outlineTitle(_ page: UUID) -> String? { outline?.first { $0.pageId == page }?.title }
+    func extent(_ page: UUID) -> PageExtent { pageExtents?[page.uuidString] ?? .zero }
     var isTrashed: Bool { trashedAt != nil }
     var isCanvas: Bool { kind == .canvas }
 }
@@ -144,5 +147,30 @@ enum SortOrder: String, CaseIterable, Identifiable {
         case .title: return "Title"
         case .created: return "Date Created"
         }
+    }
+}
+
+/// Space added around a page with "Add Space to Page", in page units.
+/// The original page keeps its size and sits `left`/`top` in from the corner.
+struct PageExtent: Codable, Hashable {
+    var top: CGFloat = 0
+    var left: CGFloat = 0
+    var bottom: CGFloat = 0
+    var right: CGFloat = 0
+
+    static let zero = PageExtent()
+
+    var size: CGSize {
+        let b = TemplateRenderer.pageSize
+        return CGSize(width: b.width + left + right, height: b.height + top + bottom)
+    }
+
+    /// Where the original page (and an imported page background) sits.
+    var originalRect: CGRect {
+        CGRect(origin: CGPoint(x: left, y: top), size: TemplateRenderer.pageSize)
+    }
+
+    static func + (a: PageExtent, b: PageExtent) -> PageExtent {
+        PageExtent(top: a.top + b.top, left: a.left + b.left, bottom: a.bottom + b.bottom, right: a.right + b.right)
     }
 }

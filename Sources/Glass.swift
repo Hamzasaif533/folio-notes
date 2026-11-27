@@ -20,16 +20,17 @@ extension View {
 }
 
 extension View {
-    /// Extra-see-through glass for the editor's floating bars, so the page shows through.
+    /// Light glass for the editor's floating bars. Regular glass (not "clear") so the icons keep
+    /// their contrast on white paper; the fallback is a thin frosted material.
     @ViewBuilder
     func clearGlass<S: Shape>(_ shape: S) -> some View {
         if #available(iOS 26.0, *) {
-            self.glassEffect(Glass.clear.interactive(), in: shape)
+            self.glassEffect(Glass.regular.interactive(), in: shape)
         } else {
             self.background {
                 ZStack {
-                    shape.fill(.ultraThinMaterial).opacity(0.55)
-                    shape.stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    shape.fill(.thinMaterial).opacity(0.85)
+                    shape.stroke(Color.primary.opacity(0.14), lineWidth: 0.5)
                 }
             }
             .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)

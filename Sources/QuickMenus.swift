@@ -223,6 +223,9 @@ struct PopIn: ViewModifier {
 
 /// Dark panel on the left with page thumbnails (like Noteshelf's page sidebar):
 /// search, Bookmarks / Outline / Photos filters and a bookmark ribbon on each page.
+/// What you can do to one page from the pages panel.
+enum PageAction { case copy, paste, duplicate, bookmark, addBefore, addAfter, delete }
+
 struct PageSidebar: View {
     let title: String
     let template: PageTemplate
@@ -239,6 +242,8 @@ struct PageSidebar: View {
     let onAdd: () -> Void
     let onAllNotes: () -> Void
     let onClose: () -> Void
+    var canPaste = false
+    var onPageAction: (Int, PageAction) -> Void = { _, _ in }
 
     private enum Filter: String, CaseIterable { case all = "All", bookmarks = "Bookmarks", outline = "Outline", photos = "Photos" }
     @State private var filter: Filter = .all
@@ -336,12 +341,16 @@ struct PageSidebar: View {
                             PageThumb(index: i, template: template, paper: paper,
                                       selected: i == current, image: thumbnail(i),
                                       bookmarked: bookmarked(i), caption: outlineTitle(i),
-                                      onBookmark: { onToggleBookmark(i) })
+                                      onBookmark: { onToggleBookmark(i) },
+                                      menu: { pageMenu(i) })
                                 .id(i)
                                 .onTapGesture { onSelect(i) }
+                                .contextMenu { pageMenu(i) }
                         }
                     }
-                    .padding(.vertical, 6)
+                    // Room for the selection ring so it isn't clipped at the edges.
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 7)
                 }
                 .scrollIndicators(.hidden)
                 .onAppear { proxy.scrollTo(current, anchor: .center) }
@@ -353,9 +362,27 @@ struct PageSidebar: View {
         .background(Color(hex: "#111113").ignoresSafeArea())
         .environment(\.colorScheme, .dark)
     }
+
+    @ViewBuilder
+    private func pageMenu(_ i: Int) -> some View {
+        Button { onPageAction(i, .copy) } label: { Label("Copy", systemImage: "doc.on.doc") }
+        if canPaste {
+            Button { onPageAction(i, .paste) } label: { Label("Paste After", systemImage: "doc.on.clipboard") }
+        }
+        Button { onPageAction(i, .duplicate) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+        Button { onPageAction(i, .bookmark) } label: {
+            Label(bookmarked(i) ? "Remove Bookmark" : "Bookmark",
+                  systemImage: bookmarked(i) ? "bookmark.slash" : "bookmark")
+        }
+        Divider()
+        Button { onPageAction(i, .addBefore) } label: { Label("Add Page Before", systemImage: "arrow.up.doc") }
+        Button { onPageAction(i, .addAfter) } label: { Label("Add Page After", systemImage: "arrow.down.doc") }
+        Divider()
+        Button(role: .destructive) { onPageAction(i, .delete) } label: { Label("Delete", systemImage: "trash") }
+    }
 }
 
-private struct PageThumb: View {
+private struct PageThumb<MenuContent: View>: View {
     let index: Int
     let template: PageTemplate
     let paper: PaperColor
@@ -364,6 +391,7 @@ private struct PageThumb: View {
     let bookmarked: Bool
     let caption: String?
     let onBookmark: () -> Void
+    @ViewBuilder let menu: () -> MenuContent
 
     var body: some View {
         VStack(spacing: 6) {
@@ -387,13 +415,21 @@ private struct PageThumb: View {
                 .buttonStyle(PressableStyle())
                 .accessibilityLabel(bookmarked ? "Remove bookmark" : "Bookmark page")
             }
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.action : Color.clear, lineWidth: 3).padding(-3))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(selected ? Theme.action : Color.clear, lineWidth: 3).padding(-5))
             HStack(spacing: 4) {
                 Text("\(index + 1)")
                     .font(.caption.weight(.semibold).monospacedDigit())
                 if let caption {
                     Text(caption).font(.caption).lineLimit(1)
                 }
+                Spacer(minLength: 0)
+                Menu { menu() } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 30, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Page \(index + 1) options")
             }
             .foregroundStyle(selected ? Theme.action : .white.opacity(0.75))
         }

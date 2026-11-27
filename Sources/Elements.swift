@@ -544,21 +544,24 @@ struct PageContent {
     var drawing: PKDrawing
     var elements: [PageElement]
     var background: UIImage?
+    var extent: PageExtent = .zero
 }
 
 enum PageRenderer {
     static func draw(_ page: PageContent, template: PageTemplate, paper: PaperColor, in ctx: CGContext,
                      imageLoader: (String) -> UIImage?, inkScale: CGFloat = 3) {
-        let rect = CGRect(origin: .zero, size: TemplateRenderer.pageSize)
+        let rect = CGRect(origin: .zero, size: page.extent.size)
         if let bg = page.background {
             paper.uiColor.setFill()
             ctx.fill(rect)
-            let s = min(rect.width / bg.size.width, rect.height / bg.size.height)
+            // An imported page stays where the original page was, inside any added space.
+            let o = page.extent.originalRect
+            let s = min(o.width / bg.size.width, o.height / bg.size.height)
             let size = CGSize(width: bg.size.width * s, height: bg.size.height * s)
-            bg.draw(in: CGRect(x: (rect.width - size.width) / 2, y: (rect.height - size.height) / 2,
+            bg.draw(in: CGRect(x: o.minX + (o.width - size.width) / 2, y: o.minY + (o.height - size.height) / 2,
                                width: size.width, height: size.height))
         } else {
-            TemplateRenderer.draw(template: template, paper: paper, in: ctx)
+            TemplateRenderer.draw(template: template, paper: paper, in: ctx, size: rect.size)
         }
         ElementRenderer.draw(page.elements, overInk: false, in: ctx, imageLoader: imageLoader)
         var ink = UIImage()
@@ -571,7 +574,7 @@ enum PageRenderer {
 
     static func image(_ page: PageContent, template: PageTemplate, paper: PaperColor, width: CGFloat,
                       imageLoader: (String) -> UIImage?) -> UIImage {
-        let size = TemplateRenderer.pageSize
+        let size = page.extent.size
         let s = width / size.width
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1

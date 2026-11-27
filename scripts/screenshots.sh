@@ -60,6 +60,11 @@ shot "16-nested-folder-portrait-light" -FolioOpenFolder
 shot "17-all-notes-portrait-light" -FolioOpenFirst -FolioAllNotes
 shot "18-split-bars-portrait-light" -FolioOpenFirst -FolioDockLeft -FolioColorsBottom
 shot "19-horizontal-portrait-light" -FolioOpenFirst -FolioHorizontal
+shot "20-select-portrait-light" -FolioSelect
+shot "21-edit-color-portrait-light" -FolioOpenFirst -FolioEditColor
+shot "22-tape-portrait-light" -FolioOpenFirst -FolioTapeTool
+shot "23-split-portrait-light" -FolioOpenFirst -FolioSplit
+shot "24-add-space-portrait-light" -FolioOpenFirst -FolioAddSpace
 xcrun simctl ui "$DEVICE" appearance dark
 shot "16-nested-folder-portrait-dark" -FolioOpenFolder
 run_set "portrait-dark"

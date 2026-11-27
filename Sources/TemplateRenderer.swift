@@ -12,9 +12,10 @@ enum TemplateRenderer {
         var filled: Bool
     }
 
-    static func layers(template: PageTemplate, paper: PaperColor, scale z: CGFloat = 1) -> [Layer] {
-        let w = pageSize.width
-        let h = pageSize.height
+    static func layers(template: PageTemplate, paper: PaperColor, scale z: CGFloat = 1,
+                       size: CGSize = pageSize) -> [Layer] {
+        let w = size.width
+        let h = size.height
         var result: [Layer] = []
 
         func add(_ path: CGMutablePath, color: UIColor, width: CGFloat, filled: Bool = false) {
@@ -92,10 +93,10 @@ enum TemplateRenderer {
     }
 
     /// Draws the template into a Core Graphics context (used by PDF export).
-    static func draw(template: PageTemplate, paper: PaperColor, in ctx: CGContext) {
+    static func draw(template: PageTemplate, paper: PaperColor, in ctx: CGContext, size: CGSize = pageSize) {
         ctx.setFillColor(paper.uiColor.cgColor)
-        ctx.fill(CGRect(origin: .zero, size: pageSize))
-        for layer in layers(template: template, paper: paper) {
+        ctx.fill(CGRect(origin: .zero, size: size))
+        for layer in layers(template: template, paper: paper, size: size) {
             ctx.addPath(layer.path)
             if layer.filled {
                 ctx.setFillColor(layer.color.cgColor)

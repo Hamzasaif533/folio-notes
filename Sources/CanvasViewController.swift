@@ -153,8 +153,8 @@ final class CanvasViewController: DrawingSurfaceController {
         canvas.showsVerticalScrollIndicator = false
         canvas.showsHorizontalScrollIndicator = false
         canvas.bouncesZoom = true
-        canvas.minimumZoomScale = 0.25
-        canvas.maximumZoomScale = 5
+        canvas.minimumZoomScale = 0.2
+        canvas.maximumZoomScale = 6
         canvas.overrideUserInterfaceStyle = .light
         canvas.delegate = events
         let drawing = store.loadDrawing(notebookId: notebook.id, pageId: pageId)

@@ -23,6 +23,13 @@ enum DemoMode {
     static var horizontal: Bool { args.contains("-FolioHorizontal") }
     static var allNotes: Bool { args.contains("-FolioAllNotes") }
     static var textTool: Bool { args.contains("-FolioTextTool") }
+    static var editColor: Bool { args.contains("-FolioEditColor") }
+    static var selectMode: Bool { args.contains("-FolioSelect") }
+    static var pageMenu: Bool { args.contains("-FolioPageMenu") }
+    static var zoomMenu: Bool { args.contains("-FolioZoomMenu") }
+    static var split: Bool { args.contains("-FolioSplit") }
+    static var addSpace: Bool { args.contains("-FolioAddSpace") }
+    static var tapeTool: Bool { args.contains("-FolioTapeTool") }
     static var colorsDock: ToolbarDock? {
         if args.contains("-FolioColorsBottom") { return .bottom }
         if args.contains("-FolioColorsRight") { return .right }
@@ -44,6 +51,8 @@ enum DemoMode {
         let projects = store.createFolder(name: "Projects", colorIndex: 4, icon: "briefcase.fill")
         let year2 = store.createFolder(name: "Year 2", colorIndex: 1, icon: "books.vertical.fill", parentId: uni.id)
         _ = store.createFolder(name: "Labs", colorIndex: 3, icon: "flask.fill", parentId: uni.id)
+        // Open University in the sidebar tree so its subfolders show.
+        UserDefaults.standard.set(uni.id.uuidString, forKey: "folio.openFolders")
 
         let specs: [(String, UUID?, Int, CoverPattern, PageTemplate)] = [
             ("Radio Receivers", uni.id, 1, .waves, .ruled),

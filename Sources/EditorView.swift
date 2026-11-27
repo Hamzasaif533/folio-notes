@@ -17,6 +17,11 @@ final class EditorController: ObservableObject {
     /// Where Apple Pencil Pro was squeezed (opens the quick menu there).
     @Published var squeezePoint: CGPoint?
     @Published var doubleTaps = 0
+    @Published var zoomLocked = false
+    @Published var fiveTaps = 0
+    /// Short messages from the page (e.g. "Undo" after a two-finger tap).
+    @Published var messageCount = 0
+    var lastMessage = ""
 }
 
 /// Hosts the paged notebook or the infinite canvas.
@@ -30,6 +35,8 @@ struct SurfaceHost: UIViewControllerRepresentable {
     let horizontal: Bool
     let textColor: String
     let textSize: CGFloat
+    let tapeColor: String
+    let tapeWidth: CGFloat
     let inputMode: DrawingInput
     let ruler: Bool
     let controller: EditorController
@@ -55,6 +62,13 @@ struct SurfaceHost: UIViewControllerRepresentable {
             DispatchQueue.main.async { if ctrl.zoomPercent != z { ctrl.zoomPercent = z } }
         }
         vc.onPencilDoubleTap = { DispatchQueue.main.async { ctrl.doubleTaps += 1 } }
+        vc.onFiveFingerTap = { DispatchQueue.main.async { ctrl.fiveTaps += 1 } }
+        vc.onMessage = { m in
+            DispatchQueue.main.async {
+                ctrl.lastMessage = m
+                ctrl.messageCount += 1
+            }
+        }
         vc.onPencilSqueeze = { p in
             DispatchQueue.main.async {
                 withAnimation(.easeOut(duration: 0.18)) {
@@ -86,7 +100,10 @@ struct SurfaceHost: UIViewControllerRepresentable {
         vc.setRuler(ruler)
         vc.textColorHex = textColor
         vc.textSize = textSize
+        vc.tapeColorHex = tapeColor
+        vc.tapeWidth = tapeWidth
         vc.setMode(tool: editorTool, feel: feel, readOnly: readOnly)
+        if vc.zoomLocked != controller.zoomLocked { vc.zoomLocked = controller.zoomLocked }
         (vc as? PagesViewController)?.setHorizontal(horizontal)
     }
 }
@@ -104,7 +121,40 @@ enum ToolbarDock: String, CaseIterable, Identifiable {
 }
 
 /// The two floating bars, each docked to its own edge.
-private enum BarKind { case tools, colors }
+private enum BarKind: Hashable { case tools, colors }
+
+private struct BarSizeKey: PreferenceKey {
+    static var defaultValue: [BarKind: CGSize] = [:]
+    static func reduce(value: inout [BarKind: CGSize], nextValue: () -> [BarKind: CGSize]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// Where a bar was dropped: its centre as fractions of the screen, and whether it stands upright.
+private struct BarPlace {
+    var x: CGFloat
+    var y: CGFloat
+    var vertical: Bool
+
+    init(x: CGFloat, y: CGFloat, vertical: Bool) {
+        self.x = x; self.y = y; self.vertical = vertical
+    }
+
+    init?(_ raw: String) {
+        let p = raw.split(separator: ",").compactMap { Double($0) }
+        guard p.count == 3 else { return nil }
+        x = CGFloat(p[0]); y = CGFloat(p[1]); vertical = p[2] > 0.5
+    }
+
+    var raw: String { "\(Double(x)),\(Double(y)),\(vertical ? 1 : 0)" }
+}
+
+/// A copied page, kept while the app runs so it can be pasted into any notebook.
+struct PageClip {
+    let notebookId: UUID
+    let pageId: UUID
+    static var current: PageClip?
+}
 
 private enum EditorCover: String, Identifiable {
     case scanner, cameraPage, cameraPhoto
@@ -117,6 +167,10 @@ struct EditorView: View {
     @Environment(\.dismiss) private var dismiss
     let notebook: Notebook
     var onSwitch: (Notebook) -> Void = { _ in }
+    /// Set inside split screen: the back arrow closes just this side.
+    var onClose: (() -> Void)? = nil
+    /// Opens another notebook next to this one (nil while already split).
+    var onSplit: ((Notebook) -> Void)? = nil
 
     @StateObject private var controller = EditorController()
     @AppStorage("folio.toolbarDock") private var dockRaw = ToolbarDock.top.rawValue
@@ -131,7 +185,17 @@ struct EditorView: View {
     @State private var shareItem: ShareItem?
     @State private var dragBar: BarKind?
     @State private var dragOffset: CGSize = .zero
-    @State private var dragTarget: ToolbarDock?
+    /// Free positions of the bars after the user moves them ("x,y,vertical", x/y as fractions of the screen).
+    @AppStorage("folio.toolsPlace") private var toolsPlaceRaw = ""
+    @AppStorage("folio.colorsPlace") private var colorsPlaceRaw = ""
+    @State private var barSizes: [BarKind: CGSize] = [:]
+    @State private var barMovedAt = Date.distantPast
+    @State private var showPenTypes = false
+    @State private var editingColor: Int?
+    @State private var pageClip: PageClip? = PageClip.current
+    @State private var pendingDeleteIndex: Int?
+    @State private var showSplitPicker = false
+    @State private var showAddSpace = false
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
     @State private var showPageBadge = false
@@ -154,8 +218,17 @@ struct EditorView: View {
     @State private var showStickerPopover = false
     @Namespace private var toolNS
 
-    private var toolsDock: ToolbarDock { ToolbarDock(rawValue: dockRaw) ?? .top }
-    private var colorsDock: ToolbarDock { ToolbarDock(rawValue: colorDockRaw) ?? .top }
+    private var toolsDock: ToolbarDock { BarPlace(toolsPlaceRaw).map(Self.edge) ?? ToolbarDock(rawValue: dockRaw) ?? .top }
+    private var colorsDock: ToolbarDock { BarPlace(colorsPlaceRaw).map(Self.edge) ?? ToolbarDock(rawValue: colorDockRaw) ?? .top }
+
+    /// The screen edge a freely placed bar is closest to.
+    private static func edge(_ p: BarPlace) -> ToolbarDock {
+        if p.vertical { return p.x < 0.5 ? .left : .right }
+        return p.y < 0.5 ? .top : .bottom
+    }
+
+    /// True for a moment after a bar was dragged, so the button under the finger doesn't fire.
+    private var barJustMoved: Bool { Date().timeIntervalSince(barMovedAt) < 0.5 }
     private var isCanvas: Bool { notebook.isCanvas }
     private var currentNotebook: Notebook { store.notebook(notebook.id) ?? notebook }
     private var currentPageId: UUID? {
@@ -169,6 +242,7 @@ struct EditorView: View {
                 SurfaceHost(store: store, notebook: notebook, tool: tools.pkTool, editorTool: tools.tool,
                             feel: tools.pen.inkFeel, readOnly: readOnly, horizontal: horizontal,
                             textColor: tools.textColorHex, textSize: tools.textSize,
+                            tapeColor: tools.tapeColorHex, tapeWidth: tools.tapeWidth,
                             inputMode: tools.inputMode, ruler: tools.rulerActive, controller: controller)
                     .ignoresSafeArea()
 
@@ -188,7 +262,14 @@ struct EditorView: View {
                 }
 
                 if showSidebar && !isCanvas {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture { showSidebar = false; showAllNotes = false }
+                        .transition(.opacity)
+                        .zIndex(5)
                     sidebarLayer
+                        .transition(.move(edge: .leading))
+                        .zIndex(6)
                 }
 
                 if let p = controller.squeezePoint {
@@ -200,6 +281,21 @@ struct EditorView: View {
                         .environmentObject(tools)
                         .transition(.opacity)
                         .zIndex(10)
+                }
+
+                if showAddSpace, let pages = controller.pages {
+                    AddSpaceView(pageImage: pages.thumbnail(of: controller.pageIndex, width: 700),
+                                 pageSize: pages.currentPageSize,
+                                 canApplyToAll: controller.pageCount > 1,
+                                 onCancel: { showAddSpace = false },
+                                 onDone: { add, all in
+                                     showAddSpace = false
+                                     guard add != .zero else { return }
+                                     pages.addSpace(add, allPages: all)
+                                     showToast(all ? "Space added to every page" : "Space added")
+                                 })
+                        .transition(.opacity)
+                        .zIndex(20)
                 }
 
                 if let toast {
@@ -222,6 +318,7 @@ struct EditorView: View {
         .persistentSystemOverlays(.hidden)
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: focusMode)
         .animation(.spring(response: 0.42, dampingFraction: 0.88), value: showSidebar)
+        .animation(.easeOut(duration: 0.22), value: showAddSpace)
         .animation(.spring(response: 0.42, dampingFraction: 0.88), value: showAllNotes)
         .animation(.easeOut(duration: 0.25), value: toast)
         .sheet(item: $shareItem) { item in
@@ -293,8 +390,9 @@ struct EditorView: View {
         }
         .confirmationDialog(isCanvas ? "Clear the whole canvas?" : "Delete this page?",
                             isPresented: $confirmDeletePage, titleVisibility: .visible) {
-            Button(isCanvas ? "Clear Canvas" : "Delete Page \(controller.pageIndex + 1)", role: .destructive) {
-                controller.pages?.deleteCurrentPage()
+            Button(isCanvas ? "Clear Canvas" : "Delete Page \((pendingDeleteIndex ?? controller.pageIndex) + 1)", role: .destructive) {
+                controller.pages?.deletePage(at: pendingDeleteIndex ?? controller.pageIndex)
+                pendingDeleteIndex = nil
                 controller.board?.clearAll()
                 controller.zoomBoxOpen = controller.pages?.isZoomBoxOpen ?? false
             }
@@ -306,6 +404,17 @@ struct EditorView: View {
             showToast(tools.toolTitle)
         }
         .onChange(of: controller.pageIndex) { _, _ in flashPageBadge() }
+        .onChange(of: controller.messageCount) { _, _ in showToast(controller.lastMessage) }
+        .onChange(of: controller.fiveTaps) { _, _ in startSplit() }
+        .sheet(isPresented: $showSplitPicker) {
+            SplitPicker(current: notebook.id) { other in
+                showSplitPicker = false
+                controller.surface?.saveAll()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onSplit?(other) }
+            }
+            .environmentObject(store)
+        }
+        .onChange(of: controller.zoomLocked) { _, locked in controller.surface?.zoomLocked = locked }
         .onChange(of: pageImageItem) { _, item in
             guard let item else { return }
             pageImageItem = nil
@@ -354,11 +463,6 @@ struct EditorView: View {
             .padding(.top, 8)
             .frame(maxHeight: .infinity, alignment: .top)
 
-            if let t = dragTarget, let b = dragBar {
-                dockPlaceholder(t, vertical: t.vertical, long: b == .tools ? 300 : 240)
-                    .transition(.opacity)
-            }
-
             placed(.tools, size: size)
             if tools.tool.hasContextBar && !readOnly {
                 placed(.colors, size: size)
@@ -379,6 +483,7 @@ struct EditorView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: showPageBadge)
+        .onPreferenceChange(BarSizeKey.self) { barSizes = $0 }
         .animation(.easeOut(duration: 0.2), value: tools.tool.hasContextBar)
         // The bars are see-through, so their icons follow the paper, not the system theme.
         .environment(\.colorScheme, currentNotebook.paper == .dark ? .dark : .light)
@@ -386,76 +491,100 @@ struct EditorView: View {
 
     private func dock(of bar: BarKind) -> ToolbarDock { bar == .tools ? toolsDock : colorsDock }
 
-    @ViewBuilder
-    private func placed(_ bar: BarKind, size: CGSize) -> some View {
-        let d = dock(of: bar)
-        // When both bars share an edge the colour bar sits just inside the tools bar.
-        let extra: CGFloat = (bar == .colors && toolsDock == colorsDock) ? (d.vertical ? 62 : 58) : 0
-        let content = Group {
-            if bar == .tools { toolsGroup(vertical: d.vertical, size: size) } else { contextBar(vertical: d.vertical) }
+    private func place(of bar: BarKind) -> BarPlace? { BarPlace(bar == .tools ? toolsPlaceRaw : colorsPlaceRaw) }
+
+    private func isVertical(_ bar: BarKind) -> Bool { place(of: bar)?.vertical ?? dock(of: bar).vertical }
+
+    /// The bar's size, swapped if it was measured before it turned upright (or flat).
+    private func barSize(_ bar: BarKind) -> CGSize {
+        let v = isVertical(bar)
+        guard let s = barSizes[bar] else {
+            let long: CGFloat = bar == .tools ? 330 : 260
+            return v ? CGSize(width: 54, height: long) : CGSize(width: long, height: 50)
         }
-        .offset(dragBar == bar ? dragOffset : .zero)
-        .gesture(dockDrag(bar, size: size))
-        switch d {
-        case .top:
-            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 8 + extra)
-        case .bottom:
-            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 14 + extra)
-        case .left:
-            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.leading, 14 + extra)
-        case .right:
-            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing).padding(.trailing, 14 + extra)
-        }
+        return (s.height > s.width) == v ? s : CGSize(width: s.height, height: s.width)
     }
 
-    private func dockDrag(_ bar: BarKind, size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 16, coordinateSpace: .global)
-            .onChanged { v in
-                if dragBar != bar { dragBar = bar }
-                dragOffset = v.translation
-                let target = nearestDock(v.location, in: size)
-                if target != dragTarget {
-                    withAnimation(.easeOut(duration: 0.15)) { dragTarget = target }
-                }
+    /// Where the bar's centre goes: wherever it was dropped, or its default spot on its edge.
+    private func center(of bar: BarKind, in size: CGSize) -> CGPoint {
+        let sz = barSize(bar)
+        var p: CGPoint
+        if let pl = place(of: bar) {
+            p = CGPoint(x: pl.x * size.width, y: pl.y * size.height)
+        } else {
+            let d = dock(of: bar)
+            // With both bars on the same edge the colour bar sits just inside the tools bar.
+            let extra: CGFloat = (bar == .colors && place(of: .tools) == nil && toolsDock == colorsDock)
+                ? (d.vertical ? 62 : 58) : 0
+            switch d {
+            case .top: p = CGPoint(x: size.width / 2, y: 8 + extra + sz.height / 2)
+            case .bottom: p = CGPoint(x: size.width / 2, y: size.height - 14 - extra - sz.height / 2)
+            case .left: p = CGPoint(x: 14 + extra + sz.width / 2, y: size.height / 2)
+            case .right: p = CGPoint(x: size.width - 14 - extra - sz.width / 2, y: size.height / 2)
             }
-            .onEnded { v in
-                let target = nearestDock(v.location, in: size)
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
-                    if bar == .tools { dockRaw = target.rawValue } else { colorDockRaw = target.rawValue }
+        }
+        // Keep the whole bar on screen.
+        p.x = min(max(p.x, sz.width / 2 + 8), max(sz.width / 2 + 8, size.width - sz.width / 2 - 8))
+        p.y = min(max(p.y, sz.height / 2 + 8), max(sz.height / 2 + 8, size.height - sz.height / 2 - 8))
+        return p
+    }
+
+    @ViewBuilder
+    private func placed(_ bar: BarKind, size: CGSize) -> some View {
+        let vertical = isVertical(bar)
+        let c = center(of: bar, in: size)
+        let lifted = dragBar == bar
+        Group {
+            if bar == .tools { toolsGroup(vertical: vertical, size: size) } else { contextBar(vertical: vertical) }
+        }
+        .fixedSize()
+        .background(GeometryReader { g in Color.clear.preference(key: BarSizeKey.self, value: [bar: g.size]) })
+        .scaleEffect(lifted ? 1.06 : 1)
+        .shadow(color: .black.opacity(lifted ? 0.2 : 0), radius: 16, x: 0, y: 8)
+        .position(x: c.x + (lifted ? dragOffset.width : 0), y: c.y + (lifted ? dragOffset.height : 0))
+        .simultaneousGesture(moveGesture(bar, size: size))
+    }
+
+    /// Hold a bar for a moment, then it follows your finger and stays where you let go.
+    /// Dropped near the left or right edge it stands upright.
+    private func moveGesture(_ bar: BarKind, size: CGSize) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.35)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if dragBar != bar {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    withAnimation(.easeOut(duration: 0.15)) { dragBar = bar }
+                }
+                let t = drag?.translation ?? .zero
+                if hypot(t.width, t.height) > 4 { barMovedAt = Date() }
+                dragOffset = t
+            }
+            .onEnded { value in
+                guard case .second(true, let drag?) = value,
+                      hypot(drag.translation.width, drag.translation.height) > 4 else {
+                    withAnimation(.easeOut(duration: 0.15)) { dragOffset = .zero; dragBar = nil }
+                    return
+                }
+                barMovedAt = Date()
+                let c = center(of: bar, in: size)
+                let p = CGPoint(x: c.x + drag.translation.width, y: c.y + drag.translation.height)
+                let nearSide = p.x < 110 || p.x > size.width - 110
+                let vertical = nearSide && p.y > 140 && p.y < size.height - 140
+                let raw = BarPlace(x: p.x / max(size.width, 1), y: p.y / max(size.height, 1), vertical: vertical).raw
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    if bar == .tools { toolsPlaceRaw = raw } else { colorsPlaceRaw = raw }
                     dragOffset = .zero
-                    dragTarget = nil
                     dragBar = nil
                 }
             }
-    }
-
-    private func nearestDock(_ p: CGPoint, in s: CGSize) -> ToolbarDock {
-        let d: [(ToolbarDock, CGFloat)] = [(.top, p.y), (.bottom, s.height - p.y),
-                                            (.left, p.x * 1.15), (.right, (s.width - p.x) * 1.15)]
-        return d.min { $0.1 < $1.1 }?.0 ?? .top
-    }
-
-    private func dockPlaceholder(_ t: ToolbarDock, vertical: Bool, long: CGFloat) -> some View {
-        let shape = Capsule()
-        let fill = shape.fill(Theme.action.opacity(0.22))
-            .overlay(shape.strokeBorder(Theme.action.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])))
-            .frame(width: vertical ? 50 : long, height: vertical ? long : 50)
-        return Group {
-            switch t {
-            case .top: fill.frame(maxHeight: .infinity, alignment: .top).padding(.top, 8)
-            case .bottom: fill.frame(maxHeight: .infinity, alignment: .bottom).padding(.bottom, 14)
-            case .left: fill.frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 14)
-            case .right: fill.frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 14)
-            }
-        }
-        .allowsHitTesting(false)
     }
 
     private var leftGroup: some View {
         HStack(spacing: 0) {
             barButton("chevron.left", label: "Back to Library") {
                 controller.surface?.saveAll()
-                dismiss()
+                if let onClose { onClose() } else { dismiss() }
             }
             if !isCanvas {
                 barButton("square.grid.2x2", label: "Pages") { showSidebar.toggle() }
@@ -492,8 +621,8 @@ struct EditorView: View {
                              readOnly: readOnly,
                              horizontal: $horizontal,
                              inputMode: $tools.inputMode,
-                             toolsDock: Binding(get: { toolsDock }, set: { d in withAnimation(.spring) { dockRaw = d.rawValue } }),
-                             colorsDock: Binding(get: { colorsDock }, set: { d in withAnimation(.spring) { colorDockRaw = d.rawValue } }),
+                             toolsDock: Binding(get: { toolsDock }, set: { d in withAnimation(.spring) { dockRaw = d.rawValue; toolsPlaceRaw = "" } }),
+                             colorsDock: Binding(get: { colorsDock }, set: { d in withAnimation(.spring) { colorDockRaw = d.rawValue; colorsPlaceRaw = "" } }),
                              onAction: perform)
                 }
         }
@@ -516,9 +645,11 @@ struct EditorView: View {
         let room = max(88, available - 232)
         let extrasLength = CGFloat(items.count) * 44
         return layout {
-            grip(vertical: vertical)
-            toolButton(.pen, symbol: tools.pen.kind.symbol, ink: tools.pen.colorHex, label: "Pen")
-            toolButton(.highlighter, symbol: "highlighter", ink: tools.highlighter.colorHex, label: "Highlighter")
+            toolButton(.pen, symbol: tools.pen.kind.symbol, ink: nil, label: "Pen")
+                .popover(isPresented: $showPenTypes) {
+                    PenTypePicker().environmentObject(tools)
+                }
+            toolButton(.highlighter, symbol: "highlighter", ink: nil, label: "Highlighter")
             toolButton(.eraser, symbol: "eraser", ink: nil, label: "Eraser")
             toolButton(.lasso, symbol: "lasso", ink: nil, label: "Lasso")
             if !items.isEmpty {
@@ -551,16 +682,6 @@ struct EditorView: View {
         return layout {
             ForEach(items) { item in extraButton(item) }
         }
-    }
-
-    private func grip(vertical: Bool) -> some View {
-        Image(systemName: "line.3.horizontal")
-            .rotationEffect(.degrees(vertical ? 0 : 90))
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Color.secondary.opacity(0.7))
-            .frame(width: vertical ? 42 : 18, height: vertical ? 18 : 38)
-            .contentShape(Rectangle())
-            .accessibilityLabel("Move bar")
     }
 
     @ViewBuilder
@@ -627,7 +748,7 @@ struct EditorView: View {
     }
 
     private func extraAction(_ item: ToolbarItemKind, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) { extraIcon(item.symbol, on: on) }
+        Button { if !barJustMoved { action() } } label: { extraIcon(item.symbol, on: on) }
             .buttonStyle(PressableStyle())
             .accessibilityLabel(item.title)
     }
@@ -644,8 +765,11 @@ struct EditorView: View {
     private func toolButton(_ tool: EditorTool, symbol: String, ink: String?, label: String) -> some View {
         let selected = tools.tool == tool
         return Button {
+            guard !barJustMoved else { return }
             if selected {
-                if tool == .pen || tool == .highlighter || tool == .eraser || tool == .shapes { showToolSettings = true }
+                // Tapping the chosen pen again offers the pen types; the eraser shows its options.
+                if tool == .pen { showPenTypes = true }
+                if tool == .eraser { showToolSettings = true }
             } else {
                 tools.tool = tool
                 if tool == .text { showToast("Tap the page to type") }
@@ -653,17 +777,8 @@ struct EditorView: View {
                 if tool == .shapes { showToast("Draw a shape and it snaps clean") }
             }
         } label: {
-            VStack(spacing: 2) {
-                Image(systemName: symbol)
-                    .font(.system(size: 18, weight: selected ? .semibold : .medium))
-                if let ink {
-                    // Ink colour bar with an outline so white/yellow ink is still visible.
-                    Capsule()
-                        .fill(Color(hex: ink))
-                        .frame(width: 14, height: 3.5)
-                        .overlay(Capsule().stroke(Color.primary.opacity(0.35), lineWidth: 0.5))
-                }
-            }
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: selected ? .semibold : .medium))
             .foregroundStyle(selected ? Theme.action : Color.primary)
             .frame(width: 44, height: 38)
             .background {
@@ -683,17 +798,9 @@ struct EditorView: View {
     private func contextBar(vertical: Bool) -> some View {
         let layout = vertical ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 10))
         return layout {
-            grip(vertical: vertical)
             switch tools.tool {
             case .pen, .shapes:
-                ForEach(0..<3, id: \.self) { i in
-                    quickColor(hex: tools.penQuickColors[i], selected: tools.pen.colorHex == tools.penQuickColors[i]) {
-                        tools.pen.colorHex = tools.penQuickColors[i]
-                    } replace: {
-                        tools.penQuickColors[i] = tools.pen.colorHex
-                    }
-                }
-                moreButton
+                colorSlots(\.penQuickColors, current: \.pen.colorHex)
                 barDivider(vertical)
                 ForEach(0..<3, id: \.self) { i in
                     quickSize(index: i, selected: abs(tools.pen.width - tools.penQuickSizes[i]) < 0.05) {
@@ -701,15 +808,7 @@ struct EditorView: View {
                     }
                 }
             case .highlighter:
-                ForEach(0..<3, id: \.self) { i in
-                    quickColor(hex: tools.highlighterQuickColors[i],
-                               selected: tools.highlighter.colorHex == tools.highlighterQuickColors[i]) {
-                        tools.highlighter.colorHex = tools.highlighterQuickColors[i]
-                    } replace: {
-                        tools.highlighterQuickColors[i] = tools.highlighter.colorHex
-                    }
-                }
-                moreButton
+                colorSlots(\.highlighterQuickColors, current: \.highlighter.colorHex)
                 barDivider(vertical)
                 ForEach(0..<3, id: \.self) { i in
                     quickSize(index: i, selected: abs(tools.highlighter.width - tools.highlighterQuickSizes[i]) < 0.05) {
@@ -727,15 +826,25 @@ struct EditorView: View {
                         }
                     }
                 }
+            case .tape:
+                ForEach(ElementView.softColors, id: \.self) { hex in
+                    quickColor(hex: hex, selected: tools.tapeColorHex == hex) { tools.tapeColorHex = hex }
+                }
+                barDivider(vertical)
+                ForEach(0..<3, id: \.self) { i in
+                    quickSize(index: i, selected: abs(tools.tapeWidth - Self.tapeWidths[i]) < 0.5) {
+                        tools.tapeWidth = Self.tapeWidths[i]
+                    }
+                }
             case .text:
                 ForEach(Array((["#1C1C1E"] + tools.penQuickColors).enumerated()), id: \.offset) { _, hex in
                     quickColor(hex: hex, selected: tools.textColorHex == hex) {
                         tools.textColorHex = hex
-                    } replace: {}
+                    }
                 }
                 barDivider(vertical)
                 ForEach(Array([16, 22, 32].enumerated()), id: \.offset) { i, s in
-                    Button { tools.textSize = CGFloat(s) } label: {
+                    Button { if !barJustMoved { tools.textSize = CGFloat(s) } } label: {
                         Text("A")
                             .font(.system(size: [12, 16, 21][i], weight: .semibold))
                             .foregroundStyle(Color.primary)
@@ -755,6 +864,62 @@ struct EditorView: View {
         .clearGlass(Capsule())
         .animation(.snappy(duration: 0.2), value: tools.pen.colorHex)
         .animation(.snappy(duration: 0.2), value: tools.highlighter.colorHex)
+        .animation(.snappy(duration: 0.2), value: tools.penQuickColors)
+        .animation(.snappy(duration: 0.2), value: tools.highlighterQuickColors)
+        .onChange(of: tools.tool) { _, _ in editingColor = nil }
+    }
+
+    private static let tapeWidths: [CGFloat] = [18, 30, 46]
+
+    /// The colour holes for a tool. Tap one to use it; tap the one in use to change its colour
+    /// (or delete it); + adds another hole.
+    @ViewBuilder
+    private func colorSlots(_ slots: ReferenceWritableKeyPath<ToolState, [String]>,
+                            current: ReferenceWritableKeyPath<ToolState, String>) -> some View {
+        let list = tools[keyPath: slots]
+        ForEach(Array(list.enumerated()), id: \.offset) { i, hex in
+            let selected = tools[keyPath: current].lowercased() == hex.lowercased()
+            quickColor(hex: hex, selected: selected) {
+                if selected { editingColor = i } else { tools[keyPath: current] = hex }
+            }
+            .popover(isPresented: Binding(get: { editingColor == i }, set: { if !$0 { editingColor = nil } })) {
+                ColorSlotPicker(
+                    hex: Binding(
+                        get: { tools[keyPath: slots].indices.contains(i) ? tools[keyPath: slots][i] : hex },
+                        set: { new in
+                            if tools[keyPath: slots].indices.contains(i) { tools[keyPath: slots][i] = new }
+                            tools[keyPath: current] = new
+                        }),
+                    onDelete: list.count > 1 ? {
+                        editingColor = nil
+                        var l = tools[keyPath: slots]
+                        guard l.indices.contains(i) else { return }
+                        l.remove(at: i)
+                        tools[keyPath: slots] = l
+                        if let first = l.first, !l.contains(tools[keyPath: current]) { tools[keyPath: current] = first }
+                    } : nil)
+            }
+        }
+        if list.count < 8 {
+            Button {
+                guard !barJustMoved else { return }
+                var l = tools[keyPath: slots]
+                l.append(tools[keyPath: current])
+                tools[keyPath: slots] = l
+                let index = l.count - 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { editingColor = index }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.secondary)
+                    .frame(width: 26, height: 26)
+                    .overlay(Circle().stroke(Color.secondary.opacity(0.6), lineWidth: 1.2))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(PressableStyle())
+            .accessibilityLabel("Add Colour")
+        }
     }
 
     private func barDivider(_ vertical: Bool) -> some View {
@@ -763,10 +928,9 @@ struct EditorView: View {
             .frame(width: vertical ? 22 : 1, height: vertical ? 1 : 22)
     }
 
-    private func quickColor(hex: String, selected: Bool, select: @escaping () -> Void,
-                            replace: @escaping () -> Void) -> some View {
+    private func quickColor(hex: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button {
-            if selected && tools.tool != .text { showToolSettings = true } else { select() }
+            if !barJustMoved { action() }
         } label: {
             ZStack {
                 Circle()
@@ -781,15 +945,10 @@ struct EditorView: View {
             .contentShape(Circle())
         }
         .buttonStyle(PressableStyle())
-        .contextMenu {
-            Button(action: replace) {
-                Label("Use Current Color Here", systemImage: "eyedropper")
-            }
-        }
     }
 
     private func quickSize(index: Int, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button { if !barJustMoved { action() } } label: {
             Capsule()
                 .fill(Color.primary)
                 .frame(width: 20, height: [2, 3.5, 6][index])
@@ -799,20 +958,6 @@ struct EditorView: View {
         }
         .buttonStyle(PressableStyle())
         .accessibilityLabel(["Thin", "Medium", "Thick"][index])
-    }
-
-    private var moreButton: some View {
-        Button { showToolSettings = true } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(Color.secondary)
-                .frame(width: 26, height: 26)
-                .overlay(Circle().stroke(Color.secondary.opacity(0.6), lineWidth: 1.2))
-                .frame(width: 34, height: 34)
-                .contentShape(Circle())
-        }
-        .buttonStyle(PressableStyle())
-        .accessibilityLabel("More Pen Options")
     }
 
     @ViewBuilder
@@ -827,7 +972,7 @@ struct EditorView: View {
 
     private func eraserModeButton(_ mode: EraserMode, symbol: String, label: String, compact: Bool) -> some View {
         let selected = tools.eraserMode == mode
-        return Button { tools.eraserMode = mode } label: {
+        return Button { if !barJustMoved { tools.eraserMode = mode } } label: {
             HStack(spacing: 6) {
                 Image(systemName: symbol)
                 if !compact { Text(label).font(.subheadline.weight(.medium)) }
@@ -860,14 +1005,8 @@ struct EditorView: View {
         Button {
             focusMode = false
         } label: {
-            VStack(spacing: 2) {
-                Image(systemName: tools.toolSymbol)
-                    .font(.system(size: 20, weight: .medium))
-                if tools.tool == .pen {
-                    Capsule().fill(Color(hex: tools.pen.colorHex)).frame(width: 14, height: 3.5)
-                        .overlay(Capsule().stroke(Color.primary.opacity(0.35), lineWidth: 0.5))
-                }
-            }
+            Image(systemName: tools.toolSymbol)
+                .font(.system(size: 20, weight: .medium))
             .foregroundStyle(Theme.action)
             .frame(width: 50, height: 50)
             .contentShape(Rectangle())
@@ -900,26 +1039,39 @@ struct EditorView: View {
                     .frame(width: 40, height: 38)
                 pillDivider
             }
-            Button { controller.surface?.resetZoom() } label: {
-                Text("\(controller.zoomPercent)%")
-                    .contentTransition(.numericText())
-                    .padding(.horizontal, 12)
-                    .frame(height: 38)
-                    .contentShape(Rectangle())
+            Menu {
+                Button { controller.surface?.resetZoom() } label: {
+                    Label(isCanvas ? "Zoom to 100%" : "Zoom to Fit Page", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+                }
+                Button { controller.zoomLocked.toggle() } label: {
+                    Label(controller.zoomLocked ? "Unlock Zoom" : "Lock Zoom",
+                          systemImage: controller.zoomLocked ? "lock.open" : "lock")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    if controller.zoomLocked {
+                        Image(systemName: "lock.fill").font(.system(size: 10, weight: .bold))
+                    }
+                    Text("\(controller.zoomPercent)%")
+                        .contentTransition(.numericText())
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 38)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Zoom \(controller.zoomPercent) percent. Tap to reset.")
+            .accessibilityLabel("Zoom \(controller.zoomPercent) percent")
             if readOnly {
                 pillDivider
                 Button { perform(.readOnly) } label: {
-                    Image(systemName: "lock.fill")
+                    Image(systemName: "eye.fill")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.action)
                         .frame(width: 40, height: 38)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(PressableStyle())
-                .accessibilityLabel("Read only. Tap to edit.")
+                .accessibilityLabel("Reading mode. Tap to edit.")
             }
         }
         .font(.footnote.monospacedDigit().weight(.semibold))
@@ -963,12 +1115,7 @@ struct EditorView: View {
     private var sidebarLayer: some View {
         let nb = currentNotebook
         let ids = nb.pages
-        return ZStack(alignment: .leading) {
-            Color.black.opacity(0.18)
-                .ignoresSafeArea()
-                .onTapGesture { showSidebar = false; showAllNotes = false }
-                .transition(.opacity)
-            HStack(spacing: 0) {
+        return HStack(spacing: 0) {
                 if showAllNotes {
                     AllNotesPanel(current: notebook.id,
                                   onBack: { showAllNotes = false },
@@ -993,7 +1140,9 @@ struct EditorView: View {
                             onSelect: { i in controller.pages?.jump(to: i) },
                             onAdd: { controller.pages?.addPage() },
                             onAllNotes: { showAllNotes.toggle() },
-                            onClose: { showSidebar = false; showAllNotes = false })
+                            onClose: { showSidebar = false; showAllNotes = false },
+                            canPaste: pageClip != nil,
+                            onPageAction: pageAction)
                     .transition(.move(edge: .leading))
                     .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { v in
                         guard abs(v.translation.width) > abs(v.translation.height) * 1.5 else { return }
@@ -1003,12 +1152,47 @@ struct EditorView: View {
                             if showAllNotes { showAllNotes = false } else { showSidebar = false }
                         }
                     })
-            }
         }
-        .zIndex(5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
     // MARK: Actions
+
+    /// Five-finger tap or More > Split Screen: pick a notebook to open next to this one.
+    private func startSplit() {
+        guard onSplit != nil else {
+            showToast("Already in split screen")
+            return
+        }
+        showSplitPicker = true
+    }
+
+    private func pageAction(_ i: Int, _ action: PageAction) {
+        guard let pages = controller.pages else { return }
+        switch action {
+        case .copy:
+            guard let pid = pages.pageId(at: i) else { return }
+            pages.saveAll()
+            PageClip.current = PageClip(notebookId: notebook.id, pageId: pid)
+            pageClip = PageClip.current
+            showToast("Page \(i + 1) copied")
+        case .paste:
+            guard let c = pageClip else { return }
+            pages.pastePage(from: c.notebookId, pageId: c.pageId, at: i + 1)
+            showToast("Page pasted")
+        case .duplicate:
+            pages.duplicatePage(at: i)
+        case .bookmark:
+            if let pid = pages.pageId(at: i) { store.toggleBookmark(notebookId: notebook.id, pageId: pid) }
+        case .addBefore:
+            pages.insertPages(count: 1, backgrounds: [], at: i)
+        case .addAfter:
+            pages.insertPages(count: 1, backgrounds: [], at: i + 1)
+        case .delete:
+            pendingDeleteIndex = i
+            confirmDeletePage = true
+        }
+    }
 
     private func closeMenus(then action: (() -> Void)? = nil) {
         showAdd = false
@@ -1082,10 +1266,14 @@ struct EditorView: View {
             controller.pages?.toggleZoomBox()
             controller.zoomBoxOpen = controller.pages?.isZoomBoxOpen ?? false
             if controller.zoomBoxOpen && !tools.tool.inks && tools.tool != .eraser { tools.tool = .pen }
+        case .splitScreen:
+            closeMenus { startSplit() }
+        case .addSpace:
+            closeMenus { if controller.pages != nil { showAddSpace = true } }
         case .readOnly:
             closeMenus()
             readOnly.toggle()
-            showToast(readOnly ? "Read only" : "Editing")
+            showToast(readOnly ? "Reading mode: the Pencil scrolls" : "Editing")
         case .info:
             closeMenus { showInfo = true }
         case .customizeToolbar:
@@ -1107,7 +1295,7 @@ struct EditorView: View {
     /// Puts a new object in the middle of the screen and switches to the
     /// object tool so it can be moved and resized straight away.
     private func place(_ make: @escaping (CGPoint) -> PageElement) {
-        guard !readOnly else { showToast("Read only"); return }
+        guard !readOnly else { showToast("Reading mode"); return }
         controller.surface?.placeObject(make)
         tools.tool = .text
         showToast("Drag to move · pull the corner to resize")
@@ -1200,15 +1388,18 @@ struct EditorView: View {
             focusMode = true
             showToast("Focus mode")
         }
+        if DemoMode.enabled { toolsPlaceRaw = ""; colorsPlaceRaw = "" }
         if let d = DemoMode.dock { dockRaw = d.rawValue } else if DemoMode.enabled { dockRaw = ToolbarDock.top.rawValue }
         if DemoMode.enabled { colorDockRaw = (DemoMode.colorsDock ?? .top).rawValue }
         if DemoMode.enabled { horizontal = DemoMode.horizontal }
         if DemoMode.enabled { tools.toolbarItems = DemoMode.customize ? ToolbarItemKind.defaults + [.tape, .zoomBox, .stickyNote] : ToolbarItemKind.defaults }
         if DemoMode.textTool { tools.tool = .text }
+        if DemoMode.tapeTool { tools.tool = .tape }
         let after = { (delay: Double, work: @escaping () -> Void) in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
-        if DemoMode.showPen { after(1.2) { showToolSettings = true } }
+        if DemoMode.showPen { after(1.2) { showPenTypes = true } }
+        if DemoMode.editColor { tools.tool = .pen; tools.pen.colorHex = tools.penQuickColors[0]; after(1.2) { editingColor = 0 } }
         if DemoMode.squeeze { after(1.2) { withAnimation(.easeOut(duration: 0.2)) { controller.squeezePoint = CGPoint(x: 520, y: 640) } } }
         if DemoMode.sidebar { after(1.0) { showSidebar = true } }
         if DemoMode.allNotes { after(1.0) { showSidebar = true; showAllNotes = true } }
@@ -1216,6 +1407,7 @@ struct EditorView: View {
         if DemoMode.showMore { after(1.2) { showMore = true } }
         if DemoMode.customize { after(1.2) { showCustomize = true } }
         if DemoMode.zoomBox { after(1.2) { perform(.zoomBox) } }
+        if DemoMode.addSpace { after(1.2) { showAddSpace = true } }
     }
 }
 
