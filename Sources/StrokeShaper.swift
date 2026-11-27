@@ -105,7 +105,7 @@ enum StrokeShaper {
     }
 
     /// Lines within 7° of horizontal/vertical snap straight.
-    private static func snapAngle(from a: CGPoint, to b: CGPoint) -> CGPoint {
+    static func snapAngle(from a: CGPoint, to b: CGPoint) -> CGPoint {
         let angle = atan2(b.y - a.y, b.x - a.x)
         let len = dist(a, b)
         for target in stride(from: -CGFloat.pi, through: CGFloat.pi, by: CGFloat.pi / 2) {

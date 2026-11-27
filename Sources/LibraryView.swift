@@ -101,6 +101,15 @@ struct LibraryView: View {
         guard !didRunDemo, DemoMode.enabled else { return }
         didRunDemo = true
         DemoMode.seedIfNeeded(store)
+        DemoMode.seedFeatures(store)
+        if let pdf = store.activeNotebooks.first(where: { $0.title == DemoMode.pdfTestTitle }) {
+            var n = pdf
+            n.darkPages = DemoMode.darkPDF ? true : nil
+            store.updateNotebook(n)
+        }
+        if DemoMode.features, let nb = store.activeNotebooks.first(where: { $0.title == DemoMode.featuresTitle }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(nb) }
+        }
         if DemoMode.showFolders { selection = .folders }
         if DemoMode.openFolder, let uni = store.folders.first(where: { $0.name == "University" }) {
             selection = .folder(uni.id)

@@ -36,7 +36,8 @@ final class PDFBackground {
     }
 
     /// Draws the page fitted inside `rect` on white paper. `ctx` uses UIKit coordinates (y down).
-    func draw(in rect: CGRect, ctx: CGContext) {
+    /// `dark` shows it as a dark page: light paper turns dark grey and dark text turns light.
+    func draw(in rect: CGRect, ctx: CGContext, dark: Bool = false) {
         guard let page else { return }
         let b = box
         let shown = size
@@ -57,6 +58,21 @@ final class PDFBackground {
         ctx.interpolationQuality = .high
         ctx.setRenderingIntent(.defaultIntent)
         ctx.drawPDFPage(page)
+        ctx.restoreGState()
+        if dark { PDFBackground.darken(fitted, ctx: ctx) }
+    }
+
+    /// Turns what's already drawn in `rect` into its dark version.
+    static func darken(_ rect: CGRect, ctx: CGContext) {
+        ctx.saveGState()
+        ctx.clip(to: rect)
+        ctx.setBlendMode(.difference)
+        ctx.setFillColor(UIColor.white.cgColor)
+        ctx.fill(rect)
+        // Pure black is harsh; lift it to the dark paper colour.
+        ctx.setBlendMode(.lighten)
+        ctx.setFillColor(PaperColor.darkImport.cgColor)
+        ctx.fill(rect)
         ctx.restoreGState()
     }
 }
@@ -93,6 +109,19 @@ final class PDFTileView: UIView {
     private let lock = NSLock()
     private var current: PDFBackground?
     private var drawSize: CGSize = .zero
+    private var drawDark = false
+
+    /// Show the page dark (Dark Imported Pages).
+    var dark: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return drawDark }
+        set {
+            lock.lock()
+            let changed = drawDark != newValue
+            drawDark = newValue
+            lock.unlock()
+            if changed { layer.contents = nil; setNeedsDisplay() }
+        }
+    }
 
     var pdf: PDFBackground? {
         get { lock.lock(); defer { lock.unlock() }; return current }
@@ -132,15 +161,29 @@ final class PDFTileView: UIView {
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         lock.lock()
-        let pdf = current, size = drawSize
+        let pdf = current, size = drawSize, dark = drawDark
         lock.unlock()
-        pdf?.draw(in: CGRect(origin: .zero, size: size), ctx: ctx)
+        pdf?.draw(in: CGRect(origin: .zero, size: size), ctx: ctx, dark: dark)
     }
 }
 
 // MARK: Smaller pictures on disk
 
 extension UIImage {
+    /// The picture as a dark page: inverted, with colours turned back to their own hue.
+    func darkPageVersion() -> UIImage? {
+        guard let input = CIImage(image: self) else { return nil }
+        let invert = CIFilter(name: "CIColorInvert")
+        invert?.setValue(input, forKey: kCIInputImageKey)
+        let hue = CIFilter(name: "CIHueAdjust")
+        hue?.setValue(invert?.outputImage, forKey: kCIInputImageKey)
+        hue?.setValue(Float.pi, forKey: kCIInputAngleKey)
+        guard let out = hue?.outputImage else { return nil }
+        let ctx = CIContext(options: nil)
+        guard let cg = ctx.createCGImage(out, from: input.extent) else { return nil }
+        return UIImage(cgImage: cg, scale: scale, orientation: .up)
+    }
+
     /// The picture as HEIC (about half the size of JPEG for the same look), or JPEG where
     /// HEIC can't be written. Returns the data and the file extension to use.
     func compactData(quality: CGFloat) -> (data: Data, ext: String)? {

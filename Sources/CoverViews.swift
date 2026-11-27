@@ -9,15 +9,24 @@ struct NotebookCoverView: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            let pal = Theme.coverPalettes[abs(cover.paletteIndex) % Theme.coverPalettes.count]
+            let pal = cover.colors
+            let photo = cover.photo.flatMap(CoverPhotos.image)
             ZStack(alignment: .topLeading) {
-                LinearGradient(colors: [Color(hex: pal.0), Color(hex: pal.1)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                CoverPatternView(pattern: cover.pattern)
-                    .opacity(0.16)
-                // Coloured spine with a soft fold shadow.
+                if let photo {
+                    Image(uiImage: photo)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: w, height: h)
+                        .clipped()
+                } else {
+                    LinearGradient(colors: [Color(hex: pal.0), Color(hex: pal.1)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    CoverPatternView(pattern: cover.pattern)
+                        .opacity(0.16)
+                }
+                // Coloured spine with a soft fold shadow (a photo gets a soft dark one).
                 Rectangle()
-                    .fill(Color(hex: pal.2))
+                    .fill(photo == nil ? Color(hex: pal.2) : Color.black.opacity(0.28))
                     .frame(width: w * 0.1, height: h)
                 LinearGradient(colors: [.black.opacity(0.18), .clear],
                                startPoint: .leading, endPoint: .trailing)
@@ -333,12 +342,13 @@ struct NotebookTile: View {
 struct TemplateThumbnail: View {
     let template: PageTemplate
     let paper: PaperColor
+    var spacing: CGFloat = 1
 
     var body: some View {
         Canvas { ctx, size in
             let s = size.width / TemplateRenderer.pageSize.width
             ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(uiColor: paper.uiColor)))
-            for layer in TemplateRenderer.layers(template: template, paper: paper, scale: s) {
+            for layer in TemplateRenderer.layers(template: template, paper: paper, scale: s, spacing: spacing) {
                 let path = Path(layer.path)
                 if layer.filled {
                     ctx.fill(path, with: .color(Color(uiColor: layer.color)))

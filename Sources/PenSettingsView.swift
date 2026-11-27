@@ -349,6 +349,7 @@ struct PenSettingsView: View {
     var embedded = false
     @AppStorage("folio.scribbleErase") private var scribbleErase = true
     @AppStorage("folio.circleLasso") private var circleLasso = true
+    @AppStorage("folio.holdToSnap") private var holdToSnap = true
 
     private var sizePresets: [CGFloat] {
         let r = tools.pen.kind.widthRange
@@ -421,6 +422,13 @@ struct PenSettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Circle to Select").font(.subheadline)
                         Text("Draw a circle around something, then tap inside it to lasso it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $holdToSnap) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Hold to Snap").font(.subheadline)
+                        Text("Keep the Pencil still at the end of a line or shape and it turns straight and clean.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -534,6 +542,8 @@ struct PenSettingsView: View {
 
 struct HighlighterSettingsView: View {
     @EnvironmentObject var tools: ToolState
+    @AppStorage("folio.straightHighlighter") private var straight = false
+    @AppStorage("folio.holdToSnap") private var holdToSnap = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -550,6 +560,20 @@ struct HighlighterSettingsView: View {
             Slider(value: $tools.highlighter.width, in: 4...50)
             Text("Color").font(.subheadline.weight(.semibold))
             ColorPalettePicker(hex: $tools.highlighter.colorHex)
+            Toggle(isOn: $straight) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Straight Highlights").font(.subheadline.weight(.semibold))
+                    Text("Every highlight is a straight line from where you start to where you lift.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Toggle(isOn: $holdToSnap) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Hold to Straighten").font(.subheadline.weight(.semibold))
+                    Text("Keep the Pencil still at the end of a highlight to make it straight.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
         .padding(18)
         .frame(width: 360)

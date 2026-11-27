@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 enum NotebookSheetMode: Identifiable {
     case create(folderId: UUID?, kind: NotebookKind)
@@ -22,6 +23,11 @@ struct NotebookSheet: View {
     @State private var cover = CoverStyle(paletteIndex: Int.random(in: 0..<Theme.coverPalettes.count), pattern: .plain)
     @State private var template: PageTemplate = .ruled
     @State private var paper: PaperColor = .white
+    @State private var spacing: Double = 1
+    @State private var format = PageFormat.standard
+    @State private var darkPages = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var photoToEdit: EditablePhoto?
     @State private var loaded = false
 
     private var isEdit: Bool {
@@ -59,15 +65,50 @@ struct NotebookSheet: View {
                     SectionTitle(text: "Cover")
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 6), spacing: 14) {
                         ForEach(0..<Theme.coverPalettes.count, id: \.self) { i in
-                            Button { cover.paletteIndex = i } label: {
+                            Button {
+                                cover.paletteIndex = i
+                                cover.customHex = nil
+                                cover.photo = nil
+                            } label: {
                                 NotebookCoverView(cover: CoverStyle(paletteIndex: i, pattern: cover.pattern))
                                     .aspectRatio(0.76, contentMode: .fit)
                                     .overlay {
                                         RoundedRectangle(cornerRadius: 6)
-                                            .stroke(Theme.accent, lineWidth: cover.paletteIndex == i ? 3 : 0)
+                                            .stroke(Theme.accent, lineWidth: isPalette(i) ? 3 : 0)
                                     }
                             }
                             .buttonStyle(.plain)
+                        }
+                    }
+                    HStack(spacing: 12) {
+                        ColorPicker(selection: Binding(
+                            get: { Color(hex: cover.customHex ?? cover.colors.0) },
+                            set: { c in
+                                cover.customHex = UIColor(c).hexString
+                                cover.photo = nil
+                            }), supportsOpacity: false) {
+                            Label("Custom Colour", systemImage: "paintpalette")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .fixedSize()
+                        .padding(.horizontal, 14)
+                        .frame(height: 40)
+                        .background(Capsule().fill(cover.customHex != nil && cover.photo == nil
+                                                   ? Theme.accent.opacity(0.18) : Color.secondary.opacity(0.12)))
+                        PhotosPicker(selection: $photoItem, matching: .images) {
+                            Label(cover.photo == nil ? "Photo from Gallery" : "Change Photo", systemImage: "photo")
+                                .font(.subheadline.weight(.medium))
+                                .padding(.horizontal, 14)
+                                .frame(height: 40)
+                                .background(Capsule().fill(cover.photo != nil ? Theme.accent.opacity(0.18)
+                                                                              : Color.secondary.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        if cover.photo != nil {
+                            Button(role: .destructive) { cover.photo = nil } label: {
+                                Label("Remove Photo", systemImage: "xmark.circle")
+                                    .font(.subheadline.weight(.medium))
+                            }
                         }
                     }
                     HStack(spacing: 10) {
@@ -111,7 +152,7 @@ struct NotebookSheet: View {
                         ForEach(templates) { t in
                             Button { withAnimation(.snappy) { template = t } } label: {
                                 VStack(spacing: 6) {
-                                    TemplateThumbnail(template: t, paper: paper)
+                                    TemplateThumbnail(template: t, paper: paper, spacing: spacing)
                                         .overlay {
                                             RoundedRectangle(cornerRadius: 4)
                                                 .stroke(Theme.accent, lineWidth: template == t ? 3 : 0)
@@ -122,10 +163,31 @@ struct NotebookSheet: View {
                             .buttonStyle(.plain)
                         }
                     }
+                    if template != .blank {
+                        SectionTitle(text: "Line Spacing")
+                        LineSpacingControl(spacing: $spacing)
+                    }
                     if isEdit {
-                        Text("Paper and template changes apply to every page in this notebook.")
+                        Text("Paper, template and line spacing changes apply to every page in this notebook.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                    }
+                    if !isCanvas {
+                        SectionTitle(text: "Page Size")
+                        PageSizePicker(format: $format)
+                        if isEdit {
+                            Text("A new page size is used for pages you add from now on. Pages you already have keep their size.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        Toggle(isOn: $darkPages) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Dark Imported Pages").font(.subheadline.weight(.semibold))
+                                Text("Show PDFs and pictures you import with dark paper and light text. Exports stay as they are.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: 520)
                     }
                 }
                 .padding(26)
@@ -142,7 +204,26 @@ struct NotebookSheet: View {
                 }
             }
             .onAppear(perform: loadIfNeeded)
+            .onChange(of: photoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
+                        await MainActor.run { photoToEdit = EditablePhoto(image: img.scaledDown(maxSide: 2400)) }
+                    }
+                    await MainActor.run { photoItem = nil }
+                }
+            }
+            .fullScreenCover(item: $photoToEdit) { p in
+                CoverPhotoEditor(image: p.image, onDone: { img in
+                    if let name = CoverPhotos.save(img) { cover.photo = name }
+                    photoToEdit = nil
+                }, onCancel: { photoToEdit = nil })
+            }
         }
+    }
+
+    private func isPalette(_ i: Int) -> Bool {
+        cover.paletteIndex == i && cover.customHex == nil && cover.photo == nil
     }
 
     private func loadIfNeeded() {
@@ -154,6 +235,9 @@ struct NotebookSheet: View {
             cover = current.cover
             template = current.template
             paper = current.paper
+            spacing = current.lineSpacing ?? 1
+            format = current.pageFormat ?? .standard
+            darkPages = current.isDarkPages
         } else if isCanvas {
             template = .dotted
         }
@@ -163,7 +247,12 @@ struct NotebookSheet: View {
         switch mode {
         case .create(let folderId, let kind):
             let nb = store.createNotebook(title: title, folderId: folderId, cover: cover,
-                                          template: template, paper: paper, kind: kind)
+                                          template: template, paper: paper, kind: kind,
+                                          format: format, lineSpacing: spacing)
+            if darkPages, var made = store.notebook(nb.id) {
+                made.darkPages = true
+                store.updateNotebook(made)
+            }
             dismiss()
             onCreate(nb)
         case .edit(let original):
@@ -172,10 +261,21 @@ struct NotebookSheet: View {
             nb.cover = cover
             nb.template = template
             nb.paper = paper
+            nb.lineSpacing = abs(spacing - 1) < 0.001 ? nil : spacing
+            if !nb.isCanvas {
+                nb.pageFormat = format == .standard ? nil : format
+                nb.darkPages = darkPages ? true : nil
+            }
             store.updateNotebook(nb)
             dismiss()
         }
     }
+}
+
+/// A picked photo waiting to be fitted to the cover.
+struct EditablePhoto: Identifiable {
+    let id = UUID()
+    let image: UIImage
 }
 
 enum FolderSheetMode: Identifiable {

@@ -44,6 +44,42 @@ struct PageElement: Codable, Identifiable, Hashable {
     var points: [CGFloat]? = nil
     /// Width of the tape band in page units.
     var lineWidth: CGFloat? = nil
+    // Added in 1.12: the part of a picture that shows, as x, y, width, height, each 0…1 of the picture.
+    var crop: [CGFloat]? = nil
+
+    /// The shown part of the picture (0…1), the whole picture when it isn't cropped.
+    var cropRect: CGRect {
+        guard let c = crop, c.count == 4, c[2] > 0, c[3] > 0 else { return CGRect(x: 0, y: 0, width: 1, height: 1) }
+        return CGRect(x: c[0], y: c[1], width: c[2], height: c[3])
+    }
+
+    /// Crops the picture to `rect` (0…1) and reshapes the frame to match, keeping its width and centre.
+    mutating func setCrop(_ rect: CGRect, imageSize: CGSize) {
+        let whole = rect.width > 0.999 && rect.height > 0.999
+        crop = whole ? nil : [rect.minX, rect.minY, rect.width, rect.height]
+        let pw = imageSize.width * rect.width, ph = imageSize.height * rect.height
+        guard pw > 0, ph > 0 else { return }
+        let c = CGPoint(x: x + w / 2, y: y + h / 2)
+        // Keep about the same area on the page.
+        let area = w * h
+        let newW = sqrt(area * pw / ph)
+        let newH = newW * ph / pw
+        frame = CGRect(x: c.x - newW / 2, y: c.y - newH / 2, width: newW, height: newH)
+    }
+
+    /// The picture with this object's crop applied.
+    func cropped(_ img: UIImage) -> UIImage {
+        let r = cropRect
+        guard crop != nil else { return img }
+        let px = CGRect(x: r.minX * img.size.width, y: r.minY * img.size.height,
+                        width: r.width * img.size.width, height: r.height * img.size.height)
+        guard px.width >= 1, px.height >= 1 else { return img }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = img.scale
+        return UIGraphicsImageRenderer(size: px.size, format: format).image { _ in
+            img.draw(at: CGPoint(x: -px.minX, y: -px.minY))
+        }
+    }
 
     var frame: CGRect {
         get { CGRect(x: x, y: y, width: w, height: h) }
@@ -76,6 +112,10 @@ enum CoverPattern: String, Codable, CaseIterable, Identifiable {
 struct CoverStyle: Codable, Hashable {
     var paletteIndex: Int
     var pattern: CoverPattern
+    // Added in 1.12: a colour picked with the colour wheel (instead of a palette), and a photo
+    // from the gallery, already cropped to the cover (a file in the Covers folder).
+    var customHex: String? = nil
+    var photo: String? = nil
 }
 
 enum PageTemplate: String, Codable, CaseIterable, Identifiable {
@@ -118,6 +158,9 @@ enum PaperColor: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// The paper behind imported pages shown dark.
+    static let darkImport = UIColor(hex: "#1F1F22")
+
     var marginColor: UIColor {
         self == .dark ? UIColor(hex: "#7A4A4A") : UIColor(hex: "#E9A3A3")
     }
@@ -143,8 +186,20 @@ struct Notebook: Identifiable, Codable, Hashable {
     var outline: [OutlineEntry]? = nil
     // Added in 1.4: extra space added around pages (keyed by page id).
     var pageExtents: [String: PageExtent]? = nil
+    // Added in 1.12: size and orientation of new pages, line spacing (1 = normal),
+    // and showing imported pages (PDFs, photos) dark.
+    var pageFormat: PageFormat? = nil
+    var lineSpacing: Double? = nil
+    var darkPages: Bool? = nil
 
     var isStarred: Bool { starred ?? false }
+    var spacing: CGFloat { CGFloat(lineSpacing ?? 1) }
+    var isDarkPages: Bool { darkPages ?? false }
+    /// What a new page starts as: the notebook's page size, or nothing for the standard A4 page.
+    var newPageExtent: PageExtent? {
+        guard let f = pageFormat, f.unitSize != TemplateRenderer.pageSize else { return nil }
+        return PageExtent(base: f.unitSize)
+    }
     func isBookmarked(_ page: UUID) -> Bool { bookmarks?.contains(page) ?? false }
     func outlineTitle(_ page: UUID) -> String? { outline?.first { $0.pageId == page }?.title }
     func extent(_ page: UUID) -> PageExtent { pageExtents?[page.uuidString] ?? .zero }
@@ -178,20 +233,101 @@ struct PageExtent: Codable, Hashable {
     var left: CGFloat = 0
     var bottom: CGFloat = 0
     var right: CGFloat = 0
+    // Added in 1.12: the page's own size before any added space (nil = standard A4, 800 x 1131).
+    var baseWidth: CGFloat? = nil
+    var baseHeight: CGFloat? = nil
 
     static let zero = PageExtent()
 
+    init(top: CGFloat = 0, left: CGFloat = 0, bottom: CGFloat = 0, right: CGFloat = 0) {
+        self.top = top; self.left = left; self.bottom = bottom; self.right = right
+    }
+
+    init(base: CGSize) {
+        baseWidth = base.width
+        baseHeight = base.height
+    }
+
+    /// The page before any added space.
+    var base: CGSize {
+        guard let w = baseWidth, let h = baseHeight, w > 0, h > 0 else { return TemplateRenderer.pageSize }
+        return CGSize(width: w, height: h)
+    }
+
     var size: CGSize {
-        let b = TemplateRenderer.pageSize
+        let b = base
         return CGSize(width: b.width + left + right, height: b.height + top + bottom)
     }
 
     /// Where the original page (and an imported page background) sits.
     var originalRect: CGRect {
-        CGRect(origin: CGPoint(x: left, y: top), size: TemplateRenderer.pageSize)
+        CGRect(origin: CGPoint(x: left, y: top), size: base)
     }
 
+    /// Adds `b`'s space; the page keeps `a`'s size.
     static func + (a: PageExtent, b: PageExtent) -> PageExtent {
-        PageExtent(top: a.top + b.top, left: a.left + b.left, bottom: a.bottom + b.bottom, right: a.right + b.right)
+        var r = PageExtent(top: a.top + b.top, left: a.left + b.left, bottom: a.bottom + b.bottom, right: a.right + b.right)
+        r.baseWidth = a.baseWidth
+        r.baseHeight = a.baseHeight
+        return r
     }
+
+    /// Only the added space (for comparing with `.zero`).
+    var addedSpace: PageExtent { PageExtent(top: top, left: left, bottom: bottom, right: right) }
+}
+
+/// Paper sizes for new pages. Sizes are in page units, where 800 is the width of A4.
+enum PageSize: String, Codable, CaseIterable, Identifiable {
+    case a4, a5, letter, b5, widescreen, ipad
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .a4: return "A4"
+        case .a5: return "A5"
+        case .letter: return "Letter"
+        case .b5: return "B5"
+        case .widescreen: return "16:9"
+        case .ipad: return "iPad Screen"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .a4: return "210 × 297 mm"
+        case .a5: return "148 × 210 mm"
+        case .letter: return "8.5 × 11 in"
+        case .b5: return "176 × 250 mm"
+        case .widescreen: return "Slides"
+        case .ipad: return "iPad Air 11\""
+        }
+    }
+
+    /// Upright size.
+    var portrait: CGSize {
+        switch self {
+        case .a4: return CGSize(width: 800, height: 1131)
+        case .a5: return CGSize(width: 564, height: 800)
+        case .letter: return CGSize(width: 822, height: 1064)
+        case .b5: return CGSize(width: 670, height: 952)
+        case .widescreen: return CGSize(width: 636, height: 1131)
+        // The iPad Air 11" screen is 1640 x 2360.
+        case .ipad: return CGSize(width: 800, height: 1151)
+        }
+    }
+
+    /// 16:9 is a slide, so it starts sideways.
+    var prefersLandscape: Bool { self == .widescreen }
+}
+
+struct PageFormat: Codable, Hashable {
+    var size: PageSize = .a4
+    var landscape: Bool = false
+
+    var unitSize: CGSize {
+        let p = size.portrait
+        return landscape ? CGSize(width: p.height, height: p.width) : p
+    }
+
+    static let standard = PageFormat()
 }

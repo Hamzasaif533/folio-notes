@@ -26,11 +26,30 @@ final class PageView: UIView {
 
     var template: PageTemplate { didSet { rebuildTemplate() } }
     var paper: PaperColor { didSet { rebuildTemplate() } }
+    /// Line spacing of the template (1 = normal).
+    var spacing: CGFloat = 1 { didSet { if spacing != oldValue { rebuildTemplate() } } }
     private(set) var background: UIImage? {
         didSet {
-            backgroundView.image = background
-            backgroundView.isHidden = background == nil
+            darkBackground = nil
+            showBackground()
         }
+    }
+    /// Dark Imported Pages: the imported page (PDF or picture) is shown dark, and black ink light.
+    var dark = false { didSet { if dark != oldValue { applyDark() } } }
+    private var darkBackground: UIImage?
+    private var showsDark: Bool { dark && hasImport }
+
+    private func showBackground() {
+        if showsDark, let bg = background, darkBackground == nil { darkBackground = bg.darkPageVersion() }
+        backgroundView.image = showsDark ? (darkBackground ?? background) : background
+        backgroundView.isHidden = background == nil
+    }
+
+    private func applyDark() {
+        pdfView.dark = showsDark
+        ink.darkPaper = showsDark
+        showBackground()
+        rebuildTemplate()
     }
     private(set) var pdf: PDFBackground? {
         didSet {
@@ -78,7 +97,7 @@ final class PageView: UIView {
         let imported = c.background != nil || c.pdf != nil
         if imported != hasImport {
             hasImport = imported
-            rebuildTemplate()
+            applyDark()
         }
     }
 
@@ -122,13 +141,14 @@ final class PageView: UIView {
     private func rebuildTemplate() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        backgroundColor = paper.uiColor
+        backgroundColor = showsDark ? PaperColor.darkImport : paper.uiColor
         templateLayers.forEach { $0.removeFromSuperlayer() }
         templateLayers = []
         // Imported pages (photos, scans, PDFs) show the page itself instead of lines.
         if !hasImport {
             let scale = window?.screen.scale ?? UIScreen.main.scale
-            templateLayers = TemplateRenderer.layers(template: template, paper: paper, scale: zoom, size: unitSize).map { l in
+            templateLayers = TemplateRenderer.layers(template: template, paper: paper, scale: zoom, size: unitSize,
+                                                    spacing: spacing).map { l in
                 let s = CAShapeLayer()
                 s.frame = CGRect(x: 0, y: 0, width: unitSize.width * zoom, height: unitSize.height * zoom)
                 s.contentsScale = scale
@@ -152,7 +172,8 @@ final class PageView: UIView {
     func markStale() { zoom = -1 }
 
     var content: PageContent {
-        PageContent(drawing: ink.drawing, elements: model.items, background: background, extent: extent, pdf: pdf)
+        PageContent(drawing: ink.drawing, elements: model.items, background: background, extent: extent, pdf: pdf,
+                    spacing: spacing)
     }
 
     /// The imported page drawn on the paper, the size of the whole page (for the zoom box).
@@ -255,6 +276,8 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         let pv = PageView(pageId: id, template: notebook.template, paper: notebook.paper,
                           hasImport: store.hasBackground(notebookId: nbId, pageId: id))
         pv.extent = notebook.extent(id)
+        pv.spacing = notebook.spacing
+        pv.dark = notebook.isDarkPages
         pv.ink.setSize(pv.unitSize)
         wireInk(pv.ink)
         let lib = self.store
@@ -285,7 +308,8 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
                            elements: store.loadElements(notebookId: nbId, pageId: id),
                            background: store.loadBackground(notebookId: nbId, pageId: id),
                            extent: extent,
-                           pdf: store.loadPDF(notebookId: nbId, pageId: id))
+                           pdf: store.loadPDF(notebookId: nbId, pageId: id),
+                           spacing: notebook.spacing)
     }
 
     private func loadPage(_ pv: PageView) {
@@ -382,8 +406,19 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         zoomBox?.layout(in: view.bounds)
     }
 
+    /// The biggest page size in the notebook (pages can differ once the page size changes).
+    private var fitBase: CGSize {
+        var s = CGSize.zero
+        for pv in pageViews {
+            let b = pv.extent.base
+            s.width = max(s.width, b.width)
+            s.height = max(s.height, b.height)
+        }
+        return s.width > 0 ? s : TemplateRenderer.pageSize
+    }
+
     private func computeFit() -> CGFloat {
-        let ps = TemplateRenderer.pageSize
+        let ps = fitBase
         let w = view.bounds.width
         if horizontal {
             // Whole page on screen, side by side like a book.
@@ -421,7 +456,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     private func layoutPages() {
         let z = docZoom
-        let ps = TemplateRenderer.pageSize
+        let ps = fitBase
         let g = Self.gapUnits
         var offsets: [CGFloat] = []
         var along: CGFloat = 0
@@ -700,7 +735,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     /// Adds pages after the current one (imported pages get their image as the background).
     func insertPages(count: Int, backgrounds: [UIImage], at index: Int? = nil) {
         let nbId = notebook.id
-        insertPages(count: max(count, backgrounds.count), at: index) { [store] i, pid in
+        insertPages(count: max(count, backgrounds.count), at: index, formatted: backgrounds.isEmpty) { [store] i, pid in
             if i < backgrounds.count {
                 store.saveBackground(backgrounds[i].scaledDown(maxSide: 2400), notebookId: nbId, pageId: pid)
             }
@@ -712,25 +747,34 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     func insertPDF(_ url: URL) -> Int {
         let nbId = notebook.id
         guard let added = store.addPDFFile(url, notebookId: nbId) else { return 0 }
-        insertPages(count: added.pages, at: nil) { [store] i, pid in
+        insertPages(count: added.pages, at: nil, formatted: false) { [store] i, pid in
             store.savePDFRef(PDFPageRef(file: added.file, index: i), notebookId: nbId, pageId: pid)
         }
         return added.pages
     }
 
-    private func insertPages(count n: Int, at index: Int?, prepare: (Int, UUID) -> Void) {
+    private func insertPages(count n: Int, at index: Int?, formatted: Bool, prepare: (Int, UUID) -> Void) {
         saveAll()
         guard n > 0 else { return }
         var at = max(0, min(index ?? currentPage + 1, pageViews.count))
         let first = at
         for i in 0..<n {
-            guard let pid = store.insertPage(notebookId: notebook.id, at: at) else { break }
+            guard let pid = store.insertPage(notebookId: notebook.id, at: at, formatted: formatted) else { break }
             prepare(i, pid)
+            // The new page's size is in the notebook's page extents.
+            if let fresh = store.notebook(notebook.id) { notebook = fresh }
             let pv = makePage(pid)
             pageViews.insert(pv, at: min(at, pageViews.count))
             at += 1
         }
         if let fresh = store.notebook(notebook.id) { notebook = fresh }
+        // A bigger page (another page size) changes what "fit to screen" is.
+        let newFit = computeFit()
+        if abs(newFit - fitZoom) > 0.0001 {
+            let wasFit = abs(docZoom - fitZoom) < 0.001 && abs(scrollView.zoomScale - 1) < 0.001
+            fitZoom = newFit
+            if wasFit { docZoom = fitZoom }
+        }
         layoutPages()
         if let pv = pageViews.indices.contains(first) ? pageViews[first] : nil {
             // Slide the new page in.
@@ -901,6 +945,24 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         for pv in pageViews {
             pv.template = template
             pv.paper = paper
+        }
+    }
+
+    /// Line spacing, the size of new pages (pages already made keep theirs) and dark imported pages.
+    func applyPageOptions(spacing: Double, format: PageFormat, darkPages: Bool) {
+        thumbs.removeAll()
+        notebook.lineSpacing = abs(spacing - 1) < 0.001 ? nil : spacing
+        notebook.pageFormat = format == .standard ? nil : format
+        notebook.darkPages = darkPages ? true : nil
+        if var fresh = store.notebook(notebook.id) {
+            fresh.lineSpacing = notebook.lineSpacing
+            fresh.pageFormat = notebook.pageFormat
+            fresh.darkPages = notebook.darkPages
+            store.updateNotebook(fresh)
+        }
+        for pv in pageViews {
+            pv.spacing = notebook.spacing
+            pv.dark = notebook.isDarkPages
         }
     }
 
@@ -1122,7 +1184,8 @@ final class ZoomBox: NSObject {
         format.scale = 2.5
         format.opaque = true
         return UIGraphicsImageRenderer(size: page.unitSize, format: format).image { ctx in
-            TemplateRenderer.draw(template: page.template, paper: page.paper, in: ctx.cgContext, size: page.unitSize)
+            TemplateRenderer.draw(template: page.template, paper: page.paper, in: ctx.cgContext, size: page.unitSize,
+                                      spacing: page.spacing)
         }
     }
 

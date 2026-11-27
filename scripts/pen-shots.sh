@@ -34,6 +34,11 @@ shot "05-pen-picker-flat" -FolioPenTest -FolioFountain -FolioTipFlat -FolioShowP
 shot "06-lecture-notes" -FolioOpenFirst
 shot "07-pdf-test" -FolioPDFTest
 shot "08-settings" -FolioSettings
+shot "10-features" -FolioFeatures
+shot "11-pdf-dark" -FolioPDFTest -FolioDarkPDF
+shot "12-calculator" -FolioOpenFirst -FolioCalc
+shot "13-browser" -FolioOpenFirst -FolioBrowser
+shot "14-paper-sheet" -FolioFeatures -FolioPaper
 xcrun simctl ui "$DEVICE" appearance dark
 shot "09-pen-test-dark" -FolioPenTest
 ls -la shots

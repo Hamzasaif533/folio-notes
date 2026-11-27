@@ -205,10 +205,16 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func createNotebook(title: String, folderId: UUID?, cover: CoverStyle,
-                        template: PageTemplate, paper: PaperColor, kind: NotebookKind = .paged) -> Notebook {
+                        template: PageTemplate, paper: PaperColor, kind: NotebookKind = .paged,
+                        format: PageFormat? = nil, lineSpacing: Double? = nil) -> Notebook {
         var nb = Notebook(title: title.isEmpty ? (kind == .canvas ? "Untitled Canvas" : "Untitled") : title,
                           folderId: folderId, cover: cover, template: template, paper: paper, pages: [UUID()])
         nb.kind = kind == .canvas ? .canvas : nil
+        if kind != .canvas {
+            nb.pageFormat = format == .standard ? nil : format
+            nb.lineSpacing = lineSpacing == 1 ? nil : lineSpacing
+            if let e = nb.newPageExtent { nb.pageExtents = [nb.pages[0].uuidString: e] }
+        }
         notebooks.append(nb)
         persist()
         return nb
@@ -511,11 +517,18 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func insertPage(notebookId: UUID, at index: Int) -> UUID? {
+    /// A new page. Blank pages get the notebook's page size; imported pages (`formatted` false)
+    /// keep the standard page their picture or PDF page fits.
+    func insertPage(notebookId: UUID, at index: Int, formatted: Bool = true) -> UUID? {
         guard let i = notebooks.firstIndex(where: { $0.id == notebookId }) else { return nil }
         let pid = UUID()
         let at = max(0, min(index, notebooks[i].pages.count))
         notebooks[i].pages.insert(pid, at: at)
+        if formatted, let e = notebooks[i].newPageExtent {
+            var m = notebooks[i].pageExtents ?? [:]
+            m[pid.uuidString] = e
+            notebooks[i].pageExtents = m
+        }
         notebooks[i].modifiedAt = Date()
         persist()
         return pid

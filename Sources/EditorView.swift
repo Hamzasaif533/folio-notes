@@ -251,6 +251,8 @@ struct EditorView: View {
     @State private var showEmojiPopover = false
     @State private var showStickerPopover = false
     @State private var showPomodoro = false
+    @State private var showCalculator = false
+    @State private var showBrowser = false
     @State private var showPomodoroFromPill = false
     @Namespace private var toolNS
 
@@ -362,9 +364,13 @@ struct EditorView: View {
             ActivityView(items: [item.url])
         }
         .sheet(isPresented: $showPaper) {
-            PaperSheet(template: currentNotebook.template, paper: currentNotebook.paper, isCanvas: isCanvas) { t, p in
-                controller.pages?.applyPaper(template: t, paper: p)
-                controller.board?.applyPaper(template: t, paper: p)
+            PaperSheet(template: currentNotebook.template, paper: currentNotebook.paper,
+                       spacing: currentNotebook.lineSpacing ?? 1, format: currentNotebook.pageFormat ?? .standard,
+                       darkPages: currentNotebook.isDarkPages, isCanvas: isCanvas) { c in
+                controller.pages?.applyPaper(template: c.template, paper: c.paper)
+                controller.pages?.applyPageOptions(spacing: c.spacing, format: c.format, darkPages: c.darkPages)
+                controller.board?.applyPaper(template: c.template, paper: c.paper)
+                controller.board?.applyLineSpacing(c.spacing)
             }
         }
         .sheet(isPresented: $showCustomize) {
@@ -553,6 +559,12 @@ struct EditorView: View {
             }
             // Split screen flashes both sides from its own view.
             if !inSplit { PomodoroEdgeFlash(timer: Pomodoro.shared) }
+
+            if showBrowser {
+                FloatingBrowser(onClose: { withAnimation(.easeOut(duration: 0.2)) { showBrowser = false } })
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    .zIndex(20)
+            }
 
             if showPageBadge && !isCanvas {
                 pageBadge
@@ -849,6 +861,13 @@ struct EditorView: View {
                     .buttonStyle(PressableStyle())
                     .accessibilityLabel(item.title)
                     .popover(isPresented: $showPomodoro) { PomodoroPanel(timer: Pomodoro.shared) }
+            case .calculator:
+                extraAction(item, on: showCalculator) { showCalculator = true }
+                    .popover(isPresented: $showCalculator) { CalculatorPanel() }
+            case .browser:
+                extraAction(item, on: showBrowser) {
+                    withAnimation(.easeOut(duration: 0.2)) { showBrowser.toggle() }
+                }
             case .ruler:
                 extraAction(item, on: tools.rulerActive) { tools.rulerActive.toggle() }
             case .readOnly:
@@ -1576,6 +1595,9 @@ struct EditorView: View {
             if DemoMode.tipRound || DemoMode.tipFlat { tools.pen.feel = f }
         }
         if DemoMode.showPen { after(2.5) { showPenTypes = true } }
+        if DemoMode.calculator { after(2.5) { showCalculator = true } }
+        if DemoMode.browser { after(1.5) { showBrowser = true } }
+        if DemoMode.paperSheet { after(1.5) { showPaper = true } }
         if DemoMode.editColor { tools.tool = .pen; tools.pen.colorHex = tools.penQuickColors[0]; after(1.2) { editingColor = 0 } }
         if DemoMode.squeeze { after(1.2) { withAnimation(.easeOut(duration: 0.2)) { controller.squeezePoint = CGPoint(x: 520, y: 640) } } }
         if DemoMode.sidebar { after(1.0) { showSidebar = true } }
@@ -1604,8 +1626,11 @@ struct PaperSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State var template: PageTemplate
     @State var paper: PaperColor
+    @State var spacing: Double = 1
+    @State var format: PageFormat = .standard
+    @State var darkPages = false
     var isCanvas = false
-    let onApply: (PageTemplate, PaperColor) -> Void
+    let onApply: (PaperChoice) -> Void
 
     private var templates: [PageTemplate] { isCanvas ? [.blank, .grid, .dotted, .ruled] : PageTemplate.allCases }
 
@@ -1628,11 +1653,29 @@ struct PaperSheet: View {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: 3), spacing: 16) {
                         ForEach(templates) { t in
                             VStack(spacing: 6) {
-                                TemplateThumbnail(template: t, paper: paper)
+                                TemplateThumbnail(template: t, paper: paper, spacing: spacing)
                                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.action, lineWidth: template == t ? 3 : 0))
                                 Text(t.title).font(.caption)
                             }
                             .onTapGesture { withAnimation(.snappy) { template = t } }
+                        }
+                    }
+                    if template != .blank {
+                        SectionTitle(text: "Line Spacing")
+                        LineSpacingControl(spacing: $spacing)
+                    }
+                    if !isCanvas {
+                        SectionTitle(text: "Page Size for New Pages")
+                        PageSizePicker(format: $format)
+                        Text("Pages you already have keep their size.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Toggle(isOn: $darkPages) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Dark Imported Pages").font(.subheadline.weight(.semibold))
+                                Text("PDFs and pictures you imported show with dark paper and light text. Exports stay as they are.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -1644,7 +1687,8 @@ struct PaperSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") {
-                        onApply(template, paper)
+                        onApply(PaperChoice(template: template, paper: paper, spacing: spacing,
+                                            format: format, darkPages: darkPages))
                         dismiss()
                     }
                     .fontWeight(.semibold)

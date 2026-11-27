@@ -19,6 +19,18 @@ final class InkCanvasView: UIView {
     private let renderLock = NSLock()
     private var renderStrokes: [InkStroke] = []
     private var renderHidden: Set<UUID> = []
+    private var renderDark = false
+
+    /// The page is shown dark (dark imported pages): black ink is shown light.
+    var darkPaper = false {
+        didSet {
+            guard darkPaper != oldValue else { return }
+            renderLock.lock()
+            renderDark = darkPaper
+            renderLock.unlock()
+            setNeedsDisplay()
+        }
+    }
 
     var tool: InkTool = .none {
         didSet { if tool != oldValue { clearSelection(); eraserRing.isHidden = true; loopCandidate = nil } }
@@ -137,8 +149,9 @@ final class InkCanvasView: UIView {
         renderLock.lock()
         let strokes = renderStrokes
         let hidden = renderHidden
+        let dark = renderDark
         renderLock.unlock()
-        InkRenderer.draw(strokes, in: ctx, rect: rect, hidden: hidden)
+        InkRenderer.draw(strokes, in: ctx, rect: rect, hidden: hidden, dark: dark)
     }
 
     /// Screen points per page unit right now.
@@ -221,8 +234,13 @@ final class InkCanvasView: UIView {
         switch mode {
         case .drawing:
             guard case .pen(let pen) = tool else { return }
+            if holdSnap != nil {
+                moveSnapped(to: location(t), pen: pen)
+                return
+            }
             for s in samples { addPoint(s, pen: pen) }
             updateLive(pen: pen, predicted: event?.predictedTouches(for: t) ?? [])
+            watchHold(at: location(t), pen: pen)
         case .erasing:
             for s in samples { erase(at: s.preciseLocation(in: self)) }
         case .lassoing:
@@ -240,7 +258,10 @@ final class InkCanvasView: UIView {
         switch mode {
         case .drawing:
             if case .pen(let pen) = tool {
-                if let tap = loopTap, let c = loopCandidate, t.timestamp - tap.time < 0.4,
+                if holdSnap != nil {
+                    loopTap = nil
+                    finishStroke(pen: pen)
+                } else if let tap = loopTap, let c = loopCandidate, t.timestamp - tap.time < 0.4,
                    points.allSatisfy({ hypot($0.cg.x - tap.at.x, $0.cg.y - tap.at.y) < 6 / ds }) {
                     // Just a tap, not writing: no dot, the circle becomes the lasso.
                     liveLayer.path = nil
@@ -277,6 +298,7 @@ final class InkCanvasView: UIView {
         case .drawing:
             liveLayer.path = nil
             points = []
+            stopHoldWatch()
         case .erasing:
             finishErase() // keep what was already rubbed out, as an undoable step
         case .lassoing:
@@ -314,8 +336,10 @@ final class InkCanvasView: UIView {
         speedSample = nil
         snap = rulerSnap?(self, t.preciseLocation(in: self))
         configure(liveLayer, pen: pen)
+        stopHoldWatch()
         addPoint(t, pen: pen)
         updateLive(pen: pen, predicted: [])
+        watchHold(at: location(t), pen: pen)
     }
 
     /// Where the Pencil is, kept on the ruler's edge when drawing along it.
@@ -399,7 +423,7 @@ final class InkCanvasView: UIView {
     }
 
     private func configure(_ l: CAShapeLayer, pen: InkPen) {
-        let c = InkColor(hex: pen.colorHex, opacity: pen.opacity)
+        let c = InkColor(hex: pen.colorHex, opacity: pen.opacity).shown(dark: darkPaper)
         l.contentsScale = sharpness()
         if pen.style == .highlighter {
             l.fillColor = nil
@@ -420,22 +444,46 @@ final class InkCanvasView: UIView {
         if let last = pts.last {
             for p in predicted { pts.append(InkPoint(location(p), w: last.width)) }
         }
+        if pen.style == .highlighter, Self.straightHighlighterEnabled, let a = pts.first, let b = pts.last, pts.count > 1 {
+            pts = Self.straightHighlight(a.cg, b.cg).map { InkPoint($0, w: pen.width) }
+        }
         liveLayer.path = pen.style == .highlighter ? InkRenderer.centerline(pts)
                                                    : InkRenderer.shape(pen.tapered(pts, end: false), style: pen.style, tip: pen.tip)
     }
 
     private func finishStroke(pen: InkPen) {
-        defer { points = []; snap = nil }
+        defer { points = []; snap = nil; stopHoldWatch() }
         guard !points.isEmpty else { liveLayer.path = nil; return }
         let raw = points.map(\.cg)
         loopCandidate = nil
-        if !pen.shapes, pen.style != .highlighter, Self.scribbleEnabled, scribbleErase(raw, pen: pen) { return }
         let color = InkColor(hex: pen.colorHex, opacity: pen.opacity)
+        if let held = snappedPoints() {
+            // Held still: the clean line or shape, at an even width.
+            let w = snapWidth(pen)
+            commit(InkStroke(style: pen.style, color: color, points: held.map { InkPoint($0, w: w) }, tip: pen.tip),
+                   pen: pen)
+            return
+        }
+        if !pen.shapes, pen.style != .highlighter, Self.scribbleEnabled, scribbleErase(raw, pen: pen) { return }
         var stroke = InkStroke(style: pen.style, color: color,
                                points: pen.liftTapered(pen.tapered(points), speed: moveSpeed), tip: pen.tip)
         if pen.shapes, let clean = StrokeShaper.recognizeShape(points.map { $0.cg }) {
             stroke = InkStroke(style: pen.style, color: color, points: clean.map { InkPoint($0, w: pen.width) })
+        } else if pen.style == .highlighter, Self.straightHighlighterEnabled, let a = raw.first, let b = raw.last,
+                  raw.count > 1 {
+            stroke = InkStroke(style: pen.style, color: color,
+                               points: Self.straightHighlight(a, b).map { InkPoint($0, w: pen.width) })
         }
+        commit(stroke, pen: pen)
+        // A loop drawn around some ink: tap inside it soon after to lasso what's in it.
+        if !pen.shapes, Self.circleLassoEnabled, let poly = Self.loop(raw),
+           !strokeIDs(inside: poly, excluding: stroke.id).isEmpty {
+            loopCandidate = LoopCandidate(strokeID: stroke.id, poly: poly, time: Date())
+        }
+    }
+
+    /// Adds a finished stroke to the page.
+    private func commit(_ stroke: InkStroke, pen: InkPen) {
         let before = drawing
         drawing.strokes.append(stroke)
         publish()
@@ -447,13 +495,106 @@ final class InkCanvasView: UIView {
         glow.path = pen.style == .highlighter ? InkRenderer.centerline(stroke.points) : InkRenderer.shape(of: stroke)
         overlay.layer.insertSublayer(glow, below: liveLayer)
         liveLayer.path = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { glow.removeFromSuperlayer() }
+        // A highlight over the same colour looks darker while both show, so it goes sooner.
+        let keep = pen.style == .highlighter ? 0.18 : 0.45
+        DispatchQueue.main.asyncAfter(deadline: .now() + keep) { glow.removeFromSuperlayer() }
         onCommit?(self, before, drawing)
-        // A loop drawn around some ink: tap inside it soon after to lasso what's in it.
-        if !pen.shapes, Self.circleLassoEnabled, let poly = Self.loop(raw),
-           !strokeIDs(inside: poly, excluding: stroke.id).isEmpty {
-            loopCandidate = LoopCandidate(strokeID: stroke.id, poly: poly, time: Date())
+    }
+
+    // MARK: Hold to snap, straight highlights
+
+    static var holdToSnapEnabled: Bool { UserDefaults.standard.object(forKey: "folio.holdToSnap") as? Bool ?? true }
+    static var straightHighlighterEnabled: Bool { UserDefaults.standard.bool(forKey: "folio.straightHighlighter") }
+
+    /// A highlight from where it started to where it is, level when it's nearly level.
+    static func straightHighlight(_ a: CGPoint, _ b: CGPoint) -> [CGPoint] {
+        var end = b
+        if abs(b.y - a.y) < abs(b.x - a.x) * tan(6 * .pi / 180) { end.y = a.y }
+        return [a, end]
+    }
+
+    private enum HoldSnap {
+        /// A straight line; its end keeps following the Pencil until you lift.
+        case line(start: CGPoint, end: CGPoint)
+        /// A clean shape.
+        case shape([CGPoint])
+    }
+    private var holdSnap: HoldSnap?
+    private var holdAnchor: CGPoint = .zero
+    private var holdWork: DispatchWorkItem?
+
+    private func stopHoldWatch() {
+        holdWork?.cancel()
+        holdWork = nil
+        holdSnap = nil
+    }
+
+    /// Starts the hold timer again whenever the Pencil moves; it fires when the Pencil stays still.
+    private func watchHold(at p: CGPoint, pen: InkPen) {
+        guard Self.holdToSnapEnabled, !pen.shapes, snap == nil, holdSnap == nil else { return }
+        if holdWork != nil, hypot(p.x - holdAnchor.x, p.y - holdAnchor.y) < 4 / ds { return }
+        holdAnchor = p
+        holdWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.holdFired(pen: pen) }
+        holdWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: work)
+    }
+
+    private func holdFired(pen: InkPen) {
+        holdWork = nil
+        guard mode == .drawing, holdSnap == nil, points.count >= 3 else { return }
+        let raw = points.map(\.cg)
+        var length: CGFloat = 0
+        for i in 1..<raw.count { length += hypot(raw[i].x - raw[i - 1].x, raw[i].y - raw[i - 1].y) }
+        // Short marks (a letter, a dot) never snap.
+        guard length > 40 / ds else { return }
+        if pen.style != .highlighter, let clean = StrokeShaper.recognizeShape(raw), clean.count > 2 {
+            holdSnap = .shape(clean)
+        } else if let a = raw.first, let b = raw.last, isStraightish(raw, a, b) {
+            holdSnap = .line(start: a, end: StrokeShaper.snapAngle(from: a, to: b))
+        } else {
+            return
         }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        showSnapped(pen: pen)
+    }
+
+    private func isStraightish(_ pts: [CGPoint], _ a: CGPoint, _ b: CGPoint) -> Bool {
+        let len = hypot(b.x - a.x, b.y - a.y)
+        guard len > 20 / ds else { return false }
+        let dev = pts.map { p -> CGFloat in
+            abs((b.x - a.x) * (a.y - p.y) - (a.x - p.x) * (b.y - a.y)) / len
+        }.max() ?? 0
+        return dev < max(len * 0.18, 6 / ds)
+    }
+
+    private func moveSnapped(to p: CGPoint, pen: InkPen) {
+        guard case .line(let a, _) = holdSnap else { return }
+        holdSnap = .line(start: a, end: StrokeShaper.snapAngle(from: a, to: p))
+        showSnapped(pen: pen)
+    }
+
+    private func snappedPoints() -> [CGPoint]? {
+        switch holdSnap {
+        case .line(let a, let b)?: return [a, b]
+        case .shape(let pts)?: return pts
+        case nil: return nil
+        }
+    }
+
+    /// The width of what was being written, kept the same all along the snapped line.
+    private func snapWidth(_ pen: InkPen) -> CGFloat {
+        guard pen.style != .highlighter, !points.isEmpty else { return pen.width }
+        let sorted = points.map(\.width).sorted()
+        return max(sorted[sorted.count / 2], 0.25)
+    }
+
+    private func showSnapped(pen: InkPen) {
+        guard let pts = snappedPoints() else { return }
+        let w = snapWidth(pen)
+        let ip = pts.map { InkPoint($0, w: w) }
+        liveLayer.path = pen.style == .highlighter ? InkRenderer.centerline(ip)
+                                                   : InkRenderer.shape(ip, style: pen.style, tip: pen.tip)
     }
 
     // MARK: Pen gestures: scribble to erase, circle then tap to lasso
@@ -841,7 +982,7 @@ final class InkCanvasView: UIView {
         format.opaque = false
         let img = UIGraphicsImageRenderer(size: rect.size, format: format).image { r in
             r.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
-            InkRenderer.draw(strokes, in: r.cgContext)
+            InkRenderer.draw(strokes, in: r.cgContext, dark: darkPaper)
         }
         selectionSnapshot.contents = img.cgImage
         selectionSnapshot.frame = rect

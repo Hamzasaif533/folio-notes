@@ -93,6 +93,16 @@ struct InkColor: Equatable {
         UIColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1).cgColor
     }
     var alpha: CGFloat { CGFloat(a) / 255 }
+
+    /// How the colour shows on a page shown dark: black and near-black ink turn light so it
+    /// stays readable. Other colours stay as they are. (Saved ink never changes.)
+    func shown(dark: Bool) -> InkColor {
+        guard dark else { return self }
+        let lum = 0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)
+        guard lum < 70 else { return self }
+        let v = UInt8(255 - lum * 0.6)
+        return InkColor(r: v, g: v, b: v, a: a)
+    }
 }
 
 /// A finished line. Strokes never change: editing one makes a new stroke with a new id.
@@ -438,14 +448,24 @@ enum InkRenderer {
     static let highlighterAlpha: CGFloat = 0.38
 
     /// Draws strokes in page units. Highlighter goes under the pens, like a real highlighter.
-    static func draw(_ strokes: [InkStroke], in ctx: CGContext, rect: CGRect? = nil, hidden: Set<UUID> = []) {
+    /// Highlights of the same colour are drawn together, so where they cross over each other
+    /// (or themselves) they don't get darker, like one pass of a real highlighter.
+    /// `dark` shows black ink light, for pages shown dark.
+    static func draw(_ strokes: [InkStroke], in ctx: CGContext, rect: CGRect? = nil, hidden: Set<UUID> = [],
+                     dark: Bool = false) {
+        var groups: [(color: InkColor, strokes: [InkStroke])] = []
         for s in strokes where s.style == .highlighter && !hidden.contains(s.id) {
             if let rect, !rect.intersects(s.bounds) { continue }
-            drawHighlighter(s, in: ctx)
+            if let k = groups.firstIndex(where: { $0.color == s.color }) {
+                groups[k].strokes.append(s)
+            } else {
+                groups.append((s.color, [s]))
+            }
         }
+        for g in groups { drawHighlighters(g.strokes, color: g.color.shown(dark: dark), in: ctx) }
         for s in strokes where s.style != .highlighter && !hidden.contains(s.id) {
             if let rect, !rect.intersects(s.bounds) { continue }
-            drawPen(s, in: ctx)
+            drawPen(s, color: s.color.shown(dark: dark), in: ctx)
         }
     }
 
@@ -453,30 +473,34 @@ enum InkRenderer {
         draw(drawing.strokes, in: ctx)
     }
 
-    private static func drawPen(_ s: InkStroke, in ctx: CGContext) {
+    private static func drawPen(_ s: InkStroke, color: InkColor, in ctx: CGContext) {
         let path = cache.outline(for: s)
         ctx.saveGState()
-        let translucent = s.color.a < 255
+        let translucent = color.a < 255
         if translucent {
-            ctx.setAlpha(s.color.alpha)
+            ctx.setAlpha(color.alpha)
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)
         }
-        ctx.setFillColor(s.color.opaqueCG)
+        ctx.setFillColor(color.opaqueCG)
         ctx.addPath(path)
         ctx.fillPath(using: .winding)
         if translucent { ctx.endTransparencyLayer() }
         ctx.restoreGState()
     }
 
-    private static func drawHighlighter(_ s: InkStroke, in ctx: CGContext) {
+    private static func drawHighlighters(_ group: [InkStroke], color: InkColor, in ctx: CGContext) {
         ctx.saveGState()
-        ctx.setAlpha(highlighterAlpha * s.color.alpha)
-        ctx.setStrokeColor(s.color.opaqueCG)
-        ctx.setLineWidth(s.averageWidth)
+        ctx.setAlpha(highlighterAlpha * color.alpha)
+        ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+        ctx.setStrokeColor(color.opaqueCG)
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
-        ctx.addPath(centerline(s.points))
-        ctx.strokePath()
+        for s in group {
+            ctx.setLineWidth(s.averageWidth)
+            ctx.addPath(centerline(s.points))
+            ctx.strokePath()
+        }
+        ctx.endTransparencyLayer()
         ctx.restoreGState()
     }
 

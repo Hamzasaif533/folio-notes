@@ -5,6 +5,8 @@ import UIKit
 final class InfiniteBackgroundView: UIView {
     var template: PageTemplate = .grid { didSet { setNeedsLayout() } }
     var paper: PaperColor = .white { didSet { backgroundColor = paper.uiColor; setNeedsLayout() } }
+    /// Line spacing (1 = normal).
+    var spacing: CGFloat = 1 { didSet { setNeedsLayout() } }
     /// Visible part of the canvas, in canvas units.
     var visible: CGRect = .zero
     var zoom: CGFloat = 1
@@ -52,6 +54,7 @@ final class InfiniteBackgroundView: UIView {
         case .ruled, .cornell: step = 32
         case .narrowRuled: step = 24
         }
+        step *= min(max(spacing, 0.5), 2.5)
         if step > 0 {
             while step * z < 9 { step *= 2 }
             let x0 = (visible.minX / step).rounded(.down) * step
@@ -111,6 +114,7 @@ final class CanvasViewController: DrawingSurfaceController, UIScrollViewDelegate
         background.frame = view.bounds
         background.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         background.template = notebook.template
+        background.spacing = notebook.spacing
         background.paper = notebook.paper
         view.addSubview(background)
 
@@ -285,6 +289,15 @@ final class CanvasViewController: DrawingSurfaceController, UIScrollViewDelegate
         view.backgroundColor = paper.uiColor
         background.template = template
         background.paper = paper
+    }
+
+    func applyLineSpacing(_ spacing: Double) {
+        notebook.lineSpacing = spacing == 1 ? nil : spacing
+        if var fresh = store.notebook(notebook.id) {
+            fresh.lineSpacing = notebook.lineSpacing
+            store.updateNotebook(fresh)
+        }
+        background.spacing = notebook.spacing
     }
 
     func clearAll() {

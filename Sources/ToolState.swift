@@ -51,10 +51,12 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
     case addPage, duplicatePage, bookmark, outline, readOnly, viewMode, search, allNotes
     case sharePDF, sharePNG, savePhoto
     case timer
+    // Added in 1.12.
+    case browser, calculator
 
     var id: String { rawValue }
 
-    static let defaults: [ToolbarItemKind] = [.shapes, .textBox, .laser, .ruler]
+    static let defaults: [ToolbarItemKind] = [.shapes, .textBox, .laser, .ruler, .browser, .calculator]
 
     var title: String {
         switch self {
@@ -81,6 +83,8 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .sharePNG: return "Share Page as PNG"
         case .savePhoto: return "Save Page as Photo"
         case .timer: return "Pomodoro Timer"
+        case .browser: return "Browser"
+        case .calculator: return "Calculator"
         }
     }
 
@@ -109,6 +113,8 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .sharePNG: return "square.and.arrow.up"
         case .savePhoto: return "photo.badge.arrow.down"
         case .timer: return "timer"
+        case .browser: return "safari"
+        case .calculator: return "plus.forwardslash.minus"
         }
     }
 
@@ -137,6 +143,8 @@ enum ToolbarItemKind: String, Codable, CaseIterable, Identifiable {
         case .sharePNG: return "Share this page as an image."
         case .savePhoto: return "Save this page to your Photos."
         case .timer: return "Focus in 25-minute sessions with short breaks in between."
+        case .browser: return "Look something up in a small web browser that floats over your notes."
+        case .calculator: return "A calculator, without leaving your notes."
         }
     }
 
@@ -341,6 +349,8 @@ final class ToolState: ObservableObject {
         var eraserReturns: Bool?
         // Added in 1.11: the fountain pen became an oval tip, so its old feel is dropped once more.
         var fountainV5: Bool?
+        // Added in 1.12: Browser and Calculator were put on the toolbar once.
+        var toolsV12: Bool?
     }
 
     private static let key = "folio.toolstate.v1"
@@ -372,6 +382,9 @@ final class ToolState: ObservableObject {
             eraserReturns = s.eraserReturns ?? true
             resetFountain = s.fountainV5 == nil
             toolbarItems = s.toolbarItems.map { $0.compactMap(ToolbarItemKind.init(rawValue:)) } ?? ToolbarItemKind.defaults
+            if s.toolsV12 == nil {
+                for k in [ToolbarItemKind.browser, .calculator] where !toolbarItems.contains(k) { toolbarItems.append(k) }
+            }
         } else {
             textColorHex = "#1C1C1E"
             textSize = 22
@@ -423,7 +436,7 @@ final class ToolState: ObservableObject {
                       tapeColorHex: tapeColorHex, tapeWidth: tapeWidth,
                       toolbarItems: toolbarItems.map { $0.rawValue },
                       tapeQuickSizes: tapeQuickSizes, penFeels: penFeels, fountainV4: true, eraserReturns: eraserReturns,
-                      fountainV5: true)
+                      fountainV5: true, toolsV12: true)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }

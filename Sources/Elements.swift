@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 
 /// The objects on one page, shared by the layer under the ink and the layer
 /// over it (tape), so both save into one list.
@@ -184,6 +185,8 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
     private let border = CAShapeLayer()
     private let handle = UIView()
     private var dragStart: CGRect = .zero
+    /// The crop the picture is shown with.
+    private var shownCrop: [CGFloat]?
 
     init(element: PageElement, layer: ElementsLayer) {
         self.element = element
@@ -297,8 +300,9 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
             layer.shadowRadius = 5
             layer.shadowOffset = CGSize(width: 0, height: 3)
         case .image:
-            if imageView.image == nil, let file = element.imageFile {
-                imageView.image = layerOwner.model.imageLoader(file)
+            if let file = element.imageFile, imageView.image == nil || shownCrop != element.crop {
+                shownCrop = element.crop
+                imageView.image = layerOwner.model.imageLoader(file).map(element.cropped)
             }
         case .emoji:
             if let symbol = element.symbol,
@@ -514,6 +518,11 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
                 }
                 actions.append(UIMenu(title: "Color", image: UIImage(systemName: "paintpalette"), children: items))
             }
+            if self.element.kind == .image {
+                actions.append(UIAction(title: "Crop", image: UIImage(systemName: "crop")) { [weak self] _ in
+                    self?.presentCrop()
+                })
+            }
             actions.append(UIAction(title: "Duplicate", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in
                 guard let self else { return }
                 var copy = self.element
@@ -530,6 +539,28 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
             })
             return UIMenu(children: actions)
         }
+    }
+
+    /// Opens the crop editor for this picture.
+    private func presentCrop() {
+        guard let file = element.imageFile, let img = layerOwner.model.imageLoader(file),
+              var top = window?.rootViewController else { return }
+        while let p = top.presentedViewController { top = p }
+        let model = layerOwner.model
+        let id = element.id
+        weak var host: UIViewController?
+        let view = ImageCropView(image: img, crop: element.cropRect, onDone: { [weak self] rect in
+            host?.dismiss(animated: true)
+            guard let self, var e = model.items.first(where: { $0.id == id }) else { return }
+            e.setCrop(rect, imageSize: img.size)
+            self.element = e
+            model.update(e)
+            self.layerOwner.relayout()
+        }, onCancel: { host?.dismiss(animated: true) })
+        let h = UIHostingController(rootView: view)
+        h.modalPresentationStyle = .fullScreen
+        host = h
+        top.present(h, animated: true)
     }
 
     static let softColors = ["#FFE680", "#FFB8D1", "#B8E6FF", "#C8F0B0", "#FFD0A8", "#D9C8FF"]
@@ -558,7 +589,8 @@ enum ElementRenderer {
                 let f = UIFont(name: "Noteworthy-Bold", size: e.fontSize ?? 22) ?? .systemFont(ofSize: e.fontSize ?? 22)
                 drawText(e.text ?? "", in: r.insetBy(dx: 14, dy: 14), font: f, color: UIColor(hex: "#3A3A3C"))
             case .image:
-                if let file = e.imageFile, let img = imageLoader(file) {
+                if let file = e.imageFile, let full = imageLoader(file) {
+                    let img = e.cropped(full)
                     ctx.saveGState()
                     UIBezierPath(roundedRect: r, cornerRadius: 6).addClip()
                     let s = max(r.width / img.size.width, r.height / img.size.height)
@@ -613,6 +645,8 @@ struct PageContent {
     var extent: PageExtent = .zero
     /// An imported PDF page (drawn from the PDF, so exports stay sharp).
     var pdf: PDFBackground? = nil
+    /// The notebook's line spacing (1 = normal).
+    var spacing: CGFloat = 1
 }
 
 enum PageRenderer {
@@ -633,7 +667,7 @@ enum PageRenderer {
             bg.draw(in: CGRect(x: o.minX + (o.width - size.width) / 2, y: o.minY + (o.height - size.height) / 2,
                                width: size.width, height: size.height))
         } else {
-            TemplateRenderer.draw(template: template, paper: paper, in: ctx, size: rect.size)
+            TemplateRenderer.draw(template: template, paper: paper, in: ctx, size: rect.size, spacing: page.spacing)
         }
         ElementRenderer.draw(page.elements, overInk: false, in: ctx, imageLoader: imageLoader)
         ctx.saveGState()
