@@ -2,6 +2,8 @@ name: Screenshots
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["v*-build"]
 
 jobs:
   shots:
