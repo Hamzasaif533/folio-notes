@@ -192,7 +192,7 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
         border.strokeColor = UIColor(red: 0.1, green: 0.62, blue: 0.86, alpha: 1).cgColor
         border.lineWidth = 1.5
         border.lineDashPattern = [6, 4]
-        layer.addSublayer(border)
+        self.layer.addSublayer(border)
 
         handle.backgroundColor = UIColor(red: 0.1, green: 0.62, blue: 0.86, alpha: 1)
         handle.layer.cornerRadius = 11

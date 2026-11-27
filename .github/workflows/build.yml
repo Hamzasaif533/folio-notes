@@ -35,7 +35,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build > xcodebuild.log 2>&1 || true
           grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild.log | head -n 80
-          test -d build/Build/Products/Release-iphoneos/Folio.app
+          test -f build/Build/Products/Release-iphoneos/Folio.app/Folio
 
       - name: Package IPA
         run: |

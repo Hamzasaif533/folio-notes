@@ -32,7 +32,7 @@ enum EditorTool: String, Codable {
 }
 
 /// GoodNotes-style pen feel. All values 0…1.
-struct InkFeel: Codable, Equatable {
+struct InkFeel: Codable, Hashable {
     /// How pointed the start and end of each stroke are.
     var tipSharpness: Double = 0
     /// How much the line width follows how hard you press.
