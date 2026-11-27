@@ -1,0 +1,43 @@
+name: Screenshots
+
+on:
+  workflow_dispatch:
+
+jobs:
+  shots:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build for simulator
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Folio.xcodeproj \
+            -scheme Folio \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-sim \
+            CODE_SIGN_IDENTITY="-" \
+            build > xcodebuild-sim.log 2>&1 || true
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild-sim.log | head -n 60
+          test -d build-sim/Build/Products/Release-iphonesimulator/Folio.app
+
+      - name: Take simulator screenshots
+        timeout-minutes: 20
+        run: bash scripts/pen-shots.sh
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: screenshots
+          path: shots
+          if-no-files-found: ignore
+          retention-days: 14

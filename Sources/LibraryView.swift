@@ -111,6 +111,11 @@ struct LibraryView: View {
         if DemoMode.openCanvas, let board = store.activeNotebooks.first(where: { $0.title == DemoMode.canvasTitle }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(board) }
         }
+        for (on, title) in [(DemoMode.penTest, DemoMode.penTestTitle), (DemoMode.pdfTest, DemoMode.pdfTestTitle)] where on {
+            if let nb = store.activeNotebooks.first(where: { $0.title == title }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(nb) }
+            }
+        }
     }
 }
 
@@ -526,6 +531,9 @@ struct NotesGridView: View {
             if DemoMode.selectMode {
                 selecting = true
                 picked = Set(items.prefix(3).map(\.id))
+            }
+            if DemoMode.settings {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showSettings = true }
             }
             if DemoMode.showNew {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showNewMenu = true }

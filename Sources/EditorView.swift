@@ -1566,6 +1566,15 @@ struct EditorView: View {
         let after = { (delay: Double, work: @escaping () -> Void) in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
+        if DemoMode.fountain {
+            tools.tool = .pen
+            tools.choosePen(.fountain)
+            tools.pen.colorHex = "#E53935"
+            var f = tools.pen.inkFeel
+            if DemoMode.tipRound { f.tipFlatness = 0 }
+            if DemoMode.tipFlat { f.tipFlatness = 1 }
+            if DemoMode.tipRound || DemoMode.tipFlat { tools.pen.feel = f }
+        }
         if DemoMode.showPen { after(1.2) { showPenTypes = true } }
         if DemoMode.editColor { tools.tool = .pen; tools.pen.colorHex = tools.penQuickColors[0]; after(1.2) { editingColor = 0 } }
         if DemoMode.squeeze { after(1.2) { withAnimation(.easeOut(duration: 0.2)) { controller.squeezePoint = CGPoint(x: 520, y: 640) } } }
