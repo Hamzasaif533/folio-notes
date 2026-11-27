@@ -1,12 +1,15 @@
 import UIKit
 import SwiftUI
 
-/// One page: paper colour + template lines (vector layers) or an imported
-/// background, objects under the ink, Folio's own ink, and tape on top.
+/// One page: paper colour + template lines (vector layers) or an imported page
+/// (a picture or a PDF page), objects under the ink, Folio's own ink, and tape on top.
+/// With "Load Only Nearby Pages" on, a page far from the screen lets go of its ink,
+/// objects and imported page, and loads them again when it comes back near.
 final class PageView: UIView {
     let pageId: UUID
     let ink: InkCanvasView
     let backgroundView = UIImageView()
+    let pdfView = PDFTileView()
     let model: ElementModel
     let under: ElementsLayer
     let over: ElementsLayer
@@ -16,25 +19,33 @@ final class PageView: UIView {
     var extent: PageExtent = .zero
     /// The page's size in page units, including added space.
     var unitSize: CGSize { extent.size }
+    /// Its ink, objects and imported page are in memory.
+    private(set) var isLoaded = false
+    /// Shows an imported page instead of template lines (known even while not loaded).
+    private(set) var hasImport: Bool
 
     var template: PageTemplate { didSet { rebuildTemplate() } }
     var paper: PaperColor { didSet { rebuildTemplate() } }
-    var background: UIImage? {
+    private(set) var background: UIImage? {
         didSet {
             backgroundView.image = background
             backgroundView.isHidden = background == nil
-            rebuildTemplate()
+        }
+    }
+    private(set) var pdf: PDFBackground? {
+        didSet {
+            pdfView.pdf = pdf
+            pdfView.isHidden = pdf == nil
         }
     }
 
-    init(pageId: UUID, template: PageTemplate, paper: PaperColor, drawing: InkDrawing,
-         elements: [PageElement], background: UIImage?) {
+    init(pageId: UUID, template: PageTemplate, paper: PaperColor, hasImport: Bool) {
         self.pageId = pageId
         ink = InkCanvasView(size: TemplateRenderer.pageSize)
         self.template = template
         self.paper = paper
-        self.background = background
-        model = ElementModel(items: elements)
+        self.hasImport = hasImport
+        model = ElementModel(items: [])
         under = ElementsLayer(model: model, overInk: false)
         over = ElementsLayer(model: model, overInk: true)
         super.init(frame: .zero)
@@ -44,18 +55,43 @@ final class PageView: UIView {
         layer.shadowOffset = CGSize(width: 0, height: 2)
 
         backgroundView.contentMode = .scaleAspectFit
-        backgroundView.image = background
-        backgroundView.isHidden = background == nil
+        backgroundView.isHidden = true
         addSubview(backgroundView)
+        pdfView.isHidden = true
+        addSubview(pdfView)
         addSubview(under)
-
-        ink.setDrawing(drawing)
         addSubview(ink)
         addSubview(over)
         rebuildTemplate()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// Puts the page's saved content in place.
+    func load(_ c: PageContent) {
+        ink.setDrawing(c.drawing)
+        model.items = c.elements
+        model.reloadLayers()
+        background = c.background
+        pdf = c.pdf
+        isLoaded = true
+        let imported = c.background != nil || c.pdf != nil
+        if imported != hasImport {
+            hasImport = imported
+            rebuildTemplate()
+        }
+    }
+
+    /// Lets go of everything heavy (it's all saved already).
+    func unload() {
+        ink.clearSelection()
+        ink.setDrawing(InkDrawing())
+        model.items = []
+        model.reloadLayers()
+        background = nil
+        pdf = nil
+        isLoaded = false
+    }
 
     /// Lays the page out at a real on-screen size so the template renders natively at that
     /// size. The ink keeps page units and is scaled; its tiles redraw at the detail needed.
@@ -69,6 +105,10 @@ final class PageView: UIView {
         ink.zoomChanged()
         let o = extent.originalRect
         backgroundView.frame = CGRect(x: o.minX * z, y: o.minY * z, width: o.width * z, height: o.height * z)
+        // Like the ink, the PDF keeps page units and is scaled (its tiles sharpen as you zoom).
+        pdfView.setSize(o.size)
+        pdfView.transform = CGAffineTransform(scaleX: z, y: z)
+        pdfView.center = CGPoint(x: o.midX * z, y: o.midY * z)
         for l in [under, over] {
             l.frame = rect
             l.scale = z
@@ -86,7 +126,7 @@ final class PageView: UIView {
         templateLayers.forEach { $0.removeFromSuperlayer() }
         templateLayers = []
         // Imported pages (photos, scans, PDFs) show the page itself instead of lines.
-        if background == nil {
+        if !hasImport {
             let scale = window?.screen.scale ?? UIScreen.main.scale
             templateLayers = TemplateRenderer.layers(template: template, paper: paper, scale: zoom, size: unitSize).map { l in
                 let s = CAShapeLayer()
@@ -112,7 +152,21 @@ final class PageView: UIView {
     func markStale() { zoom = -1 }
 
     var content: PageContent {
-        PageContent(drawing: ink.drawing, elements: model.items, background: background, extent: extent)
+        PageContent(drawing: ink.drawing, elements: model.items, background: background, extent: extent, pdf: pdf)
+    }
+
+    /// The imported page drawn on the paper, the size of the whole page (for the zoom box).
+    func importedPaper(scale: CGFloat) -> UIImage? {
+        guard background != nil || pdf != nil else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = true
+        var c = content
+        c.drawing = InkDrawing()
+        c.elements = []
+        return UIGraphicsImageRenderer(size: unitSize, format: format).image { ctx in
+            PageRenderer.draw(c, template: template, paper: paper, in: ctx.cgContext, imageLoader: { _ in nil })
+        }
     }
 }
 
@@ -190,21 +244,27 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         refreshMode()
     }
 
+    /// Library setting: pages far from the screen let go of their content (default on).
+    static var lazyPagesEnabled: Bool {
+        UserDefaults.standard.object(forKey: "folio.lazyPages") as? Bool ?? true
+    }
+    private let lazyPages = PagesViewController.lazyPagesEnabled
+
     private func makePage(_ id: UUID) -> PageView {
         let nbId = notebook.id
         let pv = PageView(pageId: id, template: notebook.template, paper: notebook.paper,
-                          drawing: store.loadDrawing(notebookId: nbId, pageId: id),
-                          elements: store.loadElements(notebookId: nbId, pageId: id),
-                          background: store.loadBackground(notebookId: nbId, pageId: id))
+                          hasImport: store.hasBackground(notebookId: nbId, pageId: id))
         pv.extent = notebook.extent(id)
         pv.ink.setSize(pv.unitSize)
         wireInk(pv.ink)
         let lib = self.store
         pv.model.imageLoader = { [weak lib] name in lib?.loadImageAsset(name, notebookId: nbId) }
-        pv.model.onSave = { [weak self] items in
-            self?.thumbs[id] = nil
-            self?.store.saveElements(items, notebookId: nbId, pageId: id)
-            self?.store.touch(nbId)
+        pv.model.onSave = { [weak self, weak pv] items in
+            // A page that isn't loaded has nothing new to save.
+            guard let self, let pv, pv.isLoaded else { return }
+            self.thumbs[id] = nil
+            self.store.saveElements(items, notebookId: nbId, pageId: id)
+            self.store.touch(nbId)
         }
         pv.model.reloadLayers()
         for l in [pv.under, pv.over] {
@@ -213,8 +273,36 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             l.erasing = editorTool == .eraser && !readOnly
         }
         pv.ink.isUserInteractionEnabled = canvasEnabled
+        if !lazyPages { loadPage(pv) }
         contentView.addSubview(pv)
         return pv
+    }
+
+    /// A page's saved content, straight from disk.
+    private func storedContent(_ id: UUID, extent: PageExtent) -> PageContent {
+        let nbId = notebook.id
+        return PageContent(drawing: store.loadDrawing(notebookId: nbId, pageId: id),
+                           elements: store.loadElements(notebookId: nbId, pageId: id),
+                           background: store.loadBackground(notebookId: nbId, pageId: id),
+                           extent: extent,
+                           pdf: store.loadPDF(notebookId: nbId, pageId: id))
+    }
+
+    private func loadPage(_ pv: PageView) {
+        guard !pv.isLoaded else { return }
+        pv.load(storedContent(pv.pageId, extent: pv.extent))
+    }
+
+    private func unloadPage(_ pv: PageView) {
+        guard pv.isLoaded, pv !== zoomBox?.page else { return }
+        if dirty.contains(pv.pageId) { save(pageId: pv.pageId) }
+        pv.unload()
+    }
+
+    /// What's on page `i`, whether or not it's loaded.
+    private func content(at i: Int) -> PageContent {
+        let pv = pageViews[i]
+        return pv.isLoaded ? pv.content : storedContent(pv.pageId, extent: pv.extent)
     }
 
     // MARK: Double-tap to fit
@@ -381,11 +469,17 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         let visible = scrollView.convert(scrollView.bounds, to: contentView)
         let margin = horizontal ? visible.width : visible.height
         let near = visible.insetBy(dx: horizontal ? -margin : 0, dy: horizontal ? 0 : -margin)
+        // Pages are let go a bit further out than they're loaded, so scrolling back and
+        // forth doesn't keep reloading the same page.
+        let keep = visible.insetBy(dx: horizontal ? -margin * 3 : 0, dy: horizontal ? 0 : -margin * 3)
         for pv in pageViews {
-            if pv.frame.intersects(near) {
+            let placed = pv.frame.width > 0 && pv.frame.height > 0
+            if placed && pv.frame.intersects(near) {
+                loadPage(pv)
                 if force || abs(pv.zoom - z) > 0.0001 { pv.apply(zoom: z) }
-            } else if force {
-                pv.markStale()
+            } else {
+                if force { pv.markStale() }
+                if lazyPages && placed && !pv.frame.intersects(keep) { unloadPage(pv) }
             }
         }
     }
@@ -555,6 +649,11 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             return pv.ink
         }
         guard let pv = pageViews.first(where: { $0.ink === canvas }) else { return canvas }
+        if !pv.isLoaded {
+            // Undo on a page that was let go: bring the rest of it back, keeping the restored ink.
+            loadPage(pv)
+            pv.ink.setDrawing(drawing)
+        }
         scheduleSave(pv)
         zoomBox?.pageChanged(pv)
         return canvas
@@ -600,16 +699,33 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     /// Adds pages after the current one (imported pages get their image as the background).
     func insertPages(count: Int, backgrounds: [UIImage], at index: Int? = nil) {
+        let nbId = notebook.id
+        insertPages(count: max(count, backgrounds.count), at: index) { [store] i, pid in
+            if i < backgrounds.count {
+                store.saveBackground(backgrounds[i].scaledDown(maxSide: 2400), notebookId: nbId, pageId: pid)
+            }
+        }
+    }
+
+    /// Adds every page of a PDF after the current one, kept as the PDF itself.
+    /// Returns how many pages were added (0 when it can't be read as a PDF).
+    func insertPDF(_ url: URL) -> Int {
+        let nbId = notebook.id
+        guard let added = store.addPDFFile(url, notebookId: nbId) else { return 0 }
+        insertPages(count: added.pages, at: nil) { [store] i, pid in
+            store.savePDFRef(PDFPageRef(file: added.file, index: i), notebookId: nbId, pageId: pid)
+        }
+        return added.pages
+    }
+
+    private func insertPages(count n: Int, at index: Int?, prepare: (Int, UUID) -> Void) {
         saveAll()
-        let n = max(count, backgrounds.count)
         guard n > 0 else { return }
         var at = max(0, min(index ?? currentPage + 1, pageViews.count))
         let first = at
         for i in 0..<n {
             guard let pid = store.insertPage(notebookId: notebook.id, at: at) else { break }
-            if i < backgrounds.count {
-                store.saveBackground(backgrounds[i].scaledDown(maxSide: 2400), notebookId: notebook.id, pageId: pid)
-            }
+            prepare(i, pid)
             let pv = makePage(pid)
             pageViews.insert(pv, at: min(at, pageViews.count))
             at += 1
@@ -654,6 +770,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         if pageViews.count == 1 {
             // Last page: just clear it.
             let pv = pageViews[0]
+            loadPage(pv)
             pv.ink.clearSelection()
             pv.ink.setDrawing(InkDrawing())
             pv.model.items = []
@@ -791,13 +908,13 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     func pageContents() -> [PageContent] {
         saveAll()
-        return pageViews.map(\.content)
+        return pageViews.indices.map(content(at:))
     }
 
     /// Just these pages, in page order (exporting a selection or a range).
     func pageContents(_ indices: [Int]) -> [PageContent] {
         saveAll()
-        return Set(indices).sorted().filter { pageViews.indices.contains($0) }.map { pageViews[$0].content }
+        return Set(indices).sorted().filter { pageViews.indices.contains($0) }.map(content(at:))
     }
 
     private var imageLoader: (String) -> UIImage? {
@@ -809,7 +926,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     /// The whole page (paper, objects and ink) as an image.
     func pageImage(_ index: Int, width: CGFloat) -> UIImage? {
         guard pageViews.indices.contains(index) else { return nil }
-        return PageRenderer.image(pageViews[index].content, template: notebook.template, paper: notebook.paper,
+        return PageRenderer.image(content(at: index), template: notebook.template, paper: notebook.paper,
                                   width: width, imageLoader: imageLoader)
     }
 
@@ -829,13 +946,17 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     /// Text typed on each page (text boxes and stickies), for search.
     func pageText(_ index: Int) -> String {
         guard pageViews.indices.contains(index) else { return "" }
-        return pageViews[index].model.items.compactMap(\.text).joined(separator: " ")
+        return elements(at: index).compactMap { $0.text }.joined(separator: " ")
+    }
+
+    private func elements(at index: Int) -> [PageElement] {
+        let pv = pageViews[index]
+        return pv.isLoaded ? pv.model.items : store.loadElements(notebookId: notebook.id, pageId: pv.pageId)
     }
 
     func pageHasPhotos(_ index: Int) -> Bool {
         guard pageViews.indices.contains(index) else { return false }
-        let pv = pageViews[index]
-        return pv.background != nil || pv.model.items.contains { $0.kind == .image }
+        return pageViews[index].hasImport || elements(at: index).contains { $0.kind == .image }
     }
 
     // MARK: Zoom box
@@ -845,6 +966,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     func toggleZoomBox() {
         if zoomBox != nil { closeZoomBox(); return }
         guard pageViews.indices.contains(currentPage) else { return }
+        loadPage(pageViews[currentPage])
         let box = ZoomBox(owner: self, page: pageViews[currentPage])
         wireInk(box.ink)
         box.ink.isUserInteractionEnabled = canvasEnabled
@@ -923,8 +1045,8 @@ final class ZoomBox: NSObject {
         paperClip.backgroundColor = page.paper.uiColor
         paperClip.layer.cornerRadius = 14
         paperClip.clipsToBounds = true
-        paperImage.image = page.backgroundView.image ?? Self.templateImage(page)
-        paperImage.contentMode = page.backgroundView.image == nil ? .scaleToFill : .scaleAspectFit
+        paperImage.image = page.importedPaper(scale: 2.5) ?? Self.templateImage(page)
+        paperImage.contentMode = .scaleToFill
         paperClip.addSubview(paperImage)
         ink.setDrawing(page.ink.drawing)
         strokeCount = page.ink.drawing.strokes.count

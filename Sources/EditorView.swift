@@ -393,6 +393,14 @@ struct EditorView: View {
             guard case .success(let url) = result else { return }
             showToast("Importing \(url.lastPathComponent)…")
             Task { @MainActor in
+                // A PDF is kept as the PDF itself: sharp at any zoom and small on disk.
+                if !isCanvas, FileImporter.isPDF(url), let pages = controller.pages {
+                    let n = FileImporter.withAccess(to: url) { pages.insertPDF(url) }
+                    if n > 0 {
+                        showToast(n == 1 ? "Page added" : "\(n) pages added")
+                        return
+                    }
+                }
                 let images = await FileImporter.pages(from: url)
                 if images.isEmpty { showToast("Couldn't open that file"); return }
                 if isCanvas { images.first.map(placePhoto) } else { addPages(images) }

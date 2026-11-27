@@ -306,8 +306,18 @@ final class LibraryStore: ObservableObject {
         notebookDir(nb).appendingPathComponent(page.uuidString + ".elements.json")
     }
 
-    private func backgroundURL(_ nb: UUID, _ page: UUID) -> URL {
-        notebookDir(nb).appendingPathComponent(page.uuidString + ".bg.jpg")
+    /// An imported page's picture: HEIC since 1.10, JPEG before.
+    private func backgroundURL(_ nb: UUID, _ page: UUID, ext: String) -> URL {
+        notebookDir(nb).appendingPathComponent(page.uuidString + ".bg." + ext)
+    }
+
+    private func existingBackgroundURL(_ nb: UUID, _ page: UUID) -> URL? {
+        ["heic", "jpg"].map { backgroundURL(nb, page, ext: $0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func pdfRefURL(_ nb: UUID, _ page: UUID) -> URL {
+        notebookDir(nb).appendingPathComponent(page.uuidString + ".pdfpage")
     }
 
     func loadElements(notebookId: UUID, pageId: UUID) -> [PageElement] {
@@ -327,26 +337,35 @@ final class LibraryStore: ObservableObject {
     }
 
     func loadBackground(notebookId: UUID, pageId: UUID) -> UIImage? {
-        UIImage(contentsOfFile: backgroundURL(notebookId, pageId).path)
+        existingBackgroundURL(notebookId, pageId).flatMap { UIImage(contentsOfFile: $0.path) }
     }
 
+    /// The page shows an imported page (a picture or a PDF page) instead of lines.
     func hasBackground(notebookId: UUID, pageId: UUID) -> Bool {
-        FileManager.default.fileExists(atPath: backgroundURL(notebookId, pageId).path)
+        existingBackgroundURL(notebookId, pageId) != nil
+            || FileManager.default.fileExists(atPath: pdfRefURL(notebookId, pageId).path)
     }
 
     func saveBackground(_ image: UIImage, notebookId: UUID, pageId: UUID) {
-        let url = backgroundURL(notebookId, pageId)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? image.jpegData(compressionQuality: 0.86)?.write(to: url, options: .atomic)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: notebookDir(notebookId), withIntermediateDirectories: true)
+        guard let out = image.compactData(quality: 0.8) else { return }
+        let ext = out.ext
+        let url = backgroundURL(notebookId, pageId, ext: ext)
+        guard (try? out.data.write(to: url, options: .atomic)) != nil else { return }
+        for other in ["heic", "jpg"] where other != ext {
+            try? fm.removeItem(at: backgroundURL(notebookId, pageId, ext: other))
+        }
     }
 
     /// Saves a photo placed on a page; returns the file name to keep in the element.
     func saveImageAsset(_ image: UIImage, notebookId: UUID) -> String? {
-        let name = UUID().uuidString + ".jpg"
+        let scaled = image.scaledDown(maxSide: 2200)
+        guard let out = scaled.compactData(quality: 0.8) else { return nil }
+        let data = out.data
+        let name = UUID().uuidString + "." + out.ext
         let url = notebookDir(notebookId).appendingPathComponent(name)
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let scaled = image.scaledDown(maxSide: 2200)
-        guard let data = scaled.jpegData(compressionQuality: 0.85) else { return nil }
         do { try data.write(to: url, options: .atomic) } catch { return nil }
         return name
     }
@@ -355,17 +374,96 @@ final class LibraryStore: ObservableObject {
         UIImage(contentsOfFile: notebookDir(notebookId).appendingPathComponent(name).path)
     }
 
+    // MARK: Imported PDFs
+
+    func loadPDF(notebookId: UUID, pageId: UUID) -> PDFBackground? {
+        guard let ref = pdfRef(notebookId, pageId),
+              let doc = PDFDocuments.open(notebookDir(notebookId).appendingPathComponent(ref.file)),
+              ref.index < doc.numberOfPages else { return nil }
+        return PDFBackground(ref: ref, document: doc)
+    }
+
+    private func pdfRef(_ nb: UUID, _ page: UUID) -> PDFPageRef? {
+        guard let data = try? Data(contentsOf: pdfRefURL(nb, page)) else { return nil }
+        return try? JSONDecoder().decode(PDFPageRef.self, from: data)
+    }
+
+    func savePDFRef(_ ref: PDFPageRef, notebookId: UUID, pageId: UUID) {
+        let url = pdfRefURL(notebookId, pageId)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(ref) { try? data.write(to: url, options: .atomic) }
+    }
+
+    /// Copies a PDF into a notebook's folder. Returns its file name and page count,
+    /// or nil when it can't be shown as a PDF (locked, damaged).
+    func addPDFFile(_ source: URL, notebookId: UUID) -> (file: String, pages: Int)? {
+        let fm = FileManager.default
+        let name = UUID().uuidString + ".pdf"
+        let dst = notebookDir(notebookId).appendingPathComponent(name)
+        try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard (try? fm.copyItem(at: source, to: dst)) != nil else { return nil }
+        guard let doc = PDFDocuments.open(dst) else {
+            try? fm.removeItem(at: dst)
+            return nil
+        }
+        return (name, min(doc.numberOfPages, 1000))
+    }
+
+    /// A notebook whose pages are the pages of an imported PDF, kept as the PDF itself.
+    func importPDFNotebook(title: String, folderId: UUID?, url: URL) -> Notebook? {
+        let nb = createNotebook(title: title, folderId: folderId,
+                                cover: CoverStyle(paletteIndex: Int.random(in: 0..<Theme.coverPalettes.count), pattern: .plain),
+                                template: .blank, paper: .white)
+        guard let added = addPDFFile(url, notebookId: nb.id),
+              let i = notebooks.firstIndex(where: { $0.id == nb.id }) else {
+            removeNotebookFiles(nb.id)
+            notebooks.removeAll { $0.id == nb.id }
+            persist()
+            return nil
+        }
+        var ids = notebooks[i].pages
+        while ids.count < added.pages { ids.append(UUID()) }
+        notebooks[i].pages = ids
+        persist()
+        for (k, pid) in ids.enumerated() {
+            savePDFRef(PDFPageRef(file: added.file, index: k), notebookId: nb.id, pageId: pid)
+        }
+        return notebooks[i]
+    }
+
+    /// Deletes a PDF once no page of the notebook shows it any more.
+    private func removeUnusedPDF(_ file: String, notebookId: UUID) {
+        guard let nb = notebook(notebookId) else { return }
+        if nb.pages.contains(where: { pdfRef(notebookId, $0)?.file == file }) { return }
+        let url = notebookDir(notebookId).appendingPathComponent(file)
+        PDFDocuments.forget(url)
+        try? FileManager.default.removeItem(at: url)
+    }
+
     private func copyPageFiles(from srcNb: UUID, page srcPage: UUID, to dstNb: UUID, page dstPage: UUID) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: notebookDir(dstNb), withIntermediateDirectories: true)
         saveDrawing(loadDrawing(notebookId: srcNb, pageId: srcPage), notebookId: dstNb, pageId: dstPage)
-        if let bg = loadBackground(notebookId: srcNb, pageId: srcPage) {
-            saveBackground(bg, notebookId: dstNb, pageId: dstPage)
+        // Files are copied as they are (no re-compressing).
+        if let bg = existingBackgroundURL(srcNb, srcPage) {
+            let dst = backgroundURL(dstNb, dstPage, ext: bg.pathExtension)
+            try? fm.removeItem(at: dst)
+            try? fm.copyItem(at: bg, to: dst)
+        }
+        if let ref = pdfRef(srcNb, srcPage) {
+            let dstPDF = notebookDir(dstNb).appendingPathComponent(ref.file)
+            if srcNb != dstNb, !fm.fileExists(atPath: dstPDF.path) {
+                try? fm.copyItem(at: notebookDir(srcNb).appendingPathComponent(ref.file), to: dstPDF)
+            }
+            savePDFRef(ref, notebookId: dstNb, pageId: dstPage)
         }
         var elements = loadElements(notebookId: srcNb, pageId: srcPage)
         for i in elements.indices {
             elements[i].id = UUID()
-            if let file = elements[i].imageFile, srcNb != dstNb,
-               let img = loadImageAsset(file, notebookId: srcNb) {
-                elements[i].imageFile = saveImageAsset(img, notebookId: dstNb)
+            if let file = elements[i].imageFile, srcNb != dstNb {
+                let src = notebookDir(srcNb).appendingPathComponent(file)
+                let dst = notebookDir(dstNb).appendingPathComponent(file)
+                if !fm.fileExists(atPath: dst.path) { try? fm.copyItem(at: src, to: dst) }
             }
         }
         saveElements(elements, notebookId: dstNb, pageId: dstPage)
@@ -433,8 +531,11 @@ final class LibraryStore: ObservableObject {
         try? fm.removeItem(at: inkURL(notebookId, pageId))
         try? fm.removeItem(at: legacyDrawingURL(notebookId, pageId))
         try? fm.removeItem(at: elementsURL(notebookId, pageId))
-        try? fm.removeItem(at: backgroundURL(notebookId, pageId))
+        for ext in ["heic", "jpg"] { try? fm.removeItem(at: backgroundURL(notebookId, pageId, ext: ext)) }
+        let pdf = pdfRef(notebookId, pageId)
+        try? fm.removeItem(at: pdfRefURL(notebookId, pageId))
         persist()
+        if let pdf { removeUnusedPDF(pdf.file, notebookId: notebookId) }
     }
 
     /// Copies a page (ink, objects and background) and puts the copy right after it.

@@ -70,6 +70,17 @@ enum FileImporter {
         .compactMap { UTType($0) }
     static let types: [UTType] = [.pdf, .image] + wordTypes + slideTypes
 
+    static func isPDF(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension.lowercased())?.conforms(to: .pdf) ?? false
+    }
+
+    /// Runs `work` while the picked file can be read.
+    static func withAccess<T>(to url: URL, _ work: () -> T) -> T {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        return work()
+    }
+
     /// Every page of a PDF, Word document or PowerPoint (or a single image), as page backgrounds.
     @MainActor
     static func pages(from url: URL) async -> [UIImage] {

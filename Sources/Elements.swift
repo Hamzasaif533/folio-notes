@@ -611,13 +611,19 @@ struct PageContent {
     var elements: [PageElement]
     var background: UIImage?
     var extent: PageExtent = .zero
+    /// An imported PDF page (drawn from the PDF, so exports stay sharp).
+    var pdf: PDFBackground? = nil
 }
 
 enum PageRenderer {
     static func draw(_ page: PageContent, template: PageTemplate, paper: PaperColor, in ctx: CGContext,
                      imageLoader: (String) -> UIImage?, inkScale: CGFloat = 3) {
         let rect = CGRect(origin: .zero, size: page.extent.size)
-        if let bg = page.background {
+        if let pdf = page.pdf {
+            paper.uiColor.setFill()
+            ctx.fill(rect)
+            pdf.draw(in: page.extent.originalRect, ctx: ctx)
+        } else if let bg = page.background {
             paper.uiColor.setFill()
             ctx.fill(rect)
             // An imported page stays where the original page was, inside any added space.

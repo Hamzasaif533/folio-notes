@@ -391,6 +391,7 @@ struct NotesGridView: View {
     @State private var confirmBulkDelete = false
     @State private var showImport = false
     @State private var importing: String?
+    @State private var showSettings = false
 
     private var sort: SortOrder { SortOrder(rawValue: sortRaw) ?? .modified }
 
@@ -501,6 +502,12 @@ struct NotesGridView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button { showSettings = true } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .sheet(isPresented: $showSettings) { LibrarySettingsView() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker("Sort By", selection: $sortRaw) {
                         ForEach(SortOrder.allCases) { s in Text(s.title).tag(s.rawValue) }
@@ -574,6 +581,13 @@ struct NotesGridView: View {
         let title = url.deletingPathExtension().lastPathComponent
         withAnimation { importing = title }
         Task { @MainActor in
+            // A PDF is kept as the PDF itself: sharp at any zoom and small on disk.
+            if FileImporter.isPDF(url),
+               let nb = FileImporter.withAccess(to: url, { store.importPDFNotebook(title: title, folderId: currentFolderId, url: url) }) {
+                withAnimation { importing = nil }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onOpen(nb) }
+                return
+            }
             let images = await FileImporter.pages(from: url)
             withAnimation { importing = nil }
             guard let nb = store.importNotebook(title: title, folderId: currentFolderId, pages: images) else { return }
@@ -899,5 +913,32 @@ struct SectionTitle: View {
         Text(text)
             .font(.title3.weight(.semibold))
             .foregroundStyle(.primary.opacity(0.85))
+    }
+}
+
+/// App-wide settings, from the notebooks page.
+struct LibrarySettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("folio.lazyPages") private var lazyPages = true
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Toggle("Load Only Nearby Pages", isOn: $lazyPages)
+                } header: {
+                    Text("Performance")
+                } footer: {
+                    Text("Only the pages around the one you're on are kept in memory, so big notebooks and PDFs open faster and use less battery. Turn it off if pages take a moment to appear when you scroll quickly. Takes effect the next time you open a notebook.")
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }

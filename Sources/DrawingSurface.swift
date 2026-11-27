@@ -63,6 +63,8 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         self.store = store
         self.notebook = notebook
         super.init(nibName: nil, bundle: nil)
+        // Each undo step keeps a full copy of the page's ink, so only the last 50 are kept.
+        undo.levelsOfUndo = 50
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
