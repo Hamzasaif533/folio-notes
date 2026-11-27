@@ -1174,7 +1174,16 @@ struct EditorView: View {
                             onAllNotes: { showAllNotes.toggle() },
                             onClose: { showSidebar = false; showAllNotes = false },
                             canPaste: pageClip != nil,
-                            onPageAction: pageAction)
+                            onPageAction: pageAction,
+                            onMovePages: { list, to in
+                                controller.pages?.movePages(list, to: to)
+                                showToast(list.count == 1 ? "Page moved" : "\(list.count) pages moved")
+                            },
+                            onDeletePages: { list in
+                                controller.pages?.deletePages(list)
+                                showToast(list.count == 1 ? "Page deleted" : "\(list.count) pages deleted")
+                            },
+                            onExportPages: exportPDF(pages:))
                     .transition(.move(edge: .leading))
                     .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { v in
                         guard abs(v.translation.width) > abs(v.translation.height) * 1.5 else { return }
@@ -1399,6 +1408,21 @@ struct EditorView: View {
                   let url = PDFExporter.export(title: nb.title, template: nb.template, paper: nb.paper,
                                                pages: pages.pageContents(),
                                                imageLoader: { lib.loadImageAsset($0, notebookId: nbId) }) {
+            shareItem = ShareItem(url: url)
+        }
+    }
+
+    /// Some of the pages as a PDF (a selection or a range from the page sidebar).
+    private func exportPDF(pages list: [Int]) {
+        let nb = currentNotebook
+        let nbId = nb.id
+        let lib = store
+        guard let pages = controller.pages, !list.isEmpty else { return }
+        let sorted = list.sorted()
+        let range = sorted.count == 1 ? "p\(sorted[0] + 1)" : "p\(sorted[0] + 1)-\(sorted[sorted.count - 1] + 1)"
+        if let url = PDFExporter.export(title: "\(nb.title) \(range)", template: nb.template, paper: nb.paper,
+                                        pages: pages.pageContents(sorted),
+                                        imageLoader: { lib.loadImageAsset($0, notebookId: nbId) }) {
             shareItem = ShareItem(url: url)
         }
     }

@@ -40,11 +40,11 @@ enum Theme {
     }
 
     // Everything below follows the theme picked in Themes (paint palette in the sidebar).
-    private static var cached: (AppTheme, ThemePalette)?
+    private static var cached: (AppTheme, Int, ThemePalette)?
     private static var p: ThemePalette {
-        if let c = cached, c.0 == AppTheme.current { return c.1 }
+        if let c = cached, c.0 == AppTheme.current, c.1 == AppTheme.revision { return c.2 }
         let v = AppTheme.current.palette
-        cached = (AppTheme.current, v)
+        cached = (AppTheme.current, AppTheme.revision, v)
         return v
     }
 

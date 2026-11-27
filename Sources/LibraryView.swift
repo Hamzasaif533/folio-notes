@@ -153,7 +153,9 @@ struct SidebarView: View {
                     tile(.all, title: "All Notes", icon: "house", tint: .primary, count: store.activeNotebooks.count)
                     tile(.starred, title: "Starred", icon: "star", tint: .yellow, count: store.starredNotebooks.count)
                     tile(.unfiled, title: "Unfiled", icon: "tray", tint: Theme.action, count: store.unfiledNotebooks.count)
+                        .libraryDropTarget(.folder(nil), store: store, cornerRadius: 18)
                     tile(.trash, title: "Trash", icon: "trash", tint: .secondary, count: store.trashedNotebooks.count)
+                        .libraryDropTarget(.trash, store: store, cornerRadius: 18)
                 }
 
                 HStack(spacing: 14) {
@@ -163,6 +165,8 @@ struct SidebarView: View {
                             .foregroundStyle(selection == .folders ? Theme.accent : Color.primary)
                     }
                     .buttonStyle(.plain)
+                    // Drop a folder here to take it out to the top level.
+                    .libraryDropTarget(.folder(nil), store: store, cornerRadius: 10)
                     Spacer()
                     Button(action: onNewFolder) {
                         Image(systemName: "folder.badge.plus")
@@ -325,6 +329,13 @@ struct SidebarView: View {
         .contextMenu {
             FolderMenu(store: store, folder: f, onEdit: onEditFolder, onDelete: onDeleteFolder, onNewSubfolder: onNewSubfolder)
         }
+        .draggable(LibraryDrag.payload(folder: f.id)) {
+            Label(f.name, systemImage: f.icon)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.9)))
+                .foregroundStyle(.white)
+        }
+        .libraryDropTarget(.folder(f.id), store: store, cornerRadius: 12)
     }
 }
 
@@ -564,6 +575,21 @@ struct NotesGridView: View {
                 }
                 .buttonStyle(PressableStyle(scale: 0.95))
                 .contextMenu { menu(for: nb) }
+                // Drag it onto a folder (while selecting, all the picked notebooks go together).
+                .draggable(LibraryDrag.payload(notebooks: selecting && picked.contains(nb.id)
+                                               ? items.map(\.id).filter { picked.contains($0) } : [nb.id])) {
+                    NotebookTile(notebook: nb, zoomNS: nil)
+                        .frame(width: 130)
+                        .overlay(alignment: .topTrailing) {
+                            if selecting && picked.count > 1 && picked.contains(nb.id) {
+                                Text("\(picked.count)")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(.white)
+                                    .padding(6)
+                                    .background(Circle().fill(Theme.action))
+                            }
+                        }
+                }
                 .staggeredAppear(i)
                 .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
@@ -582,10 +608,12 @@ struct NotesGridView: View {
             Button { withAnimation(.snappy(duration: 0.28)) { selection = .folders } } label: {
                 Label("Folders", systemImage: "chevron.left").font(.subheadline.weight(.medium))
             }
+            .libraryDropTarget(.folder(nil), store: store, cornerRadius: 8)
             ForEach(chain) { f in
                 Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
                 Button(f.name) { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } }
                     .font(.subheadline.weight(.medium))
+                    .libraryDropTarget(.folder(f.id), store: store, cornerRadius: 8)
             }
         }
         .buttonStyle(.plain)
@@ -607,6 +635,10 @@ struct NotesGridView: View {
                     FolderMenu(store: store, folder: f, onEdit: onEditFolder, onDelete: onDeleteFolder,
                                onNewSubfolder: { onNewFolder($0) })
                 }
+                .draggable(LibraryDrag.payload(folder: f.id)) {
+                    FolderCard(folder: f, notebooks: store.notebooks(in: f.id)).frame(width: 150)
+                }
+                .libraryDropTarget(.folder(f.id), store: store, cornerRadius: 22)
                 .staggeredAppear(i)
             }
         }

@@ -244,10 +244,27 @@ struct PageSidebar: View {
     let onClose: () -> Void
     var canPaste = false
     var onPageAction: (Int, PageAction) -> Void = { _, _ in }
+    /// Moves these pages (in their order) so the first lands at the given position.
+    var onMovePages: ([Int], Int) -> Void = { _, _ in }
+    var onDeletePages: ([Int]) -> Void = { _ in }
+    var onExportPages: ([Int]) -> Void = { _ in }
 
     private enum Filter: String, CaseIterable { case all = "All", bookmarks = "Bookmarks", outline = "Outline", photos = "Photos" }
     @State private var filter: Filter = .all
     @State private var query = ""
+    @State private var selecting = false
+    @State private var picked: Set<Int> = []
+    @State private var dropTarget: Int?
+    @State private var showRange = false
+    @State private var rangeFrom = 1
+    @State private var rangeTo = 1
+    @State private var showMoveTo = false
+    @State private var movePosition = 1
+    @State private var confirmDelete = false
+    /// Bumped after pages move, so every thumbnail is drawn again.
+    @State private var version = 0
+
+    private static let dragPrefix = "folio-page:"
 
     private var shown: [Int] {
         (0..<count).filter { i in
@@ -265,35 +282,23 @@ struct PageSidebar: View {
         }
     }
 
+    /// Reordering by dragging only makes sense when every page is listed.
+    private var canReorder: Bool { filter == .all && query.isEmpty && !selecting && count > 1 }
+
+    private var pickedSorted: [Int] { picked.filter { $0 < count }.sorted() }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 18) {
-                Button(action: onAllNotes) {
-                    Image(systemName: "sidebar.left").font(.system(size: 18, weight: .medium))
-                }
-                .buttonStyle(PressableStyle())
-                .accessibilityLabel("All Notes")
-                Spacer()
-                Button(action: onAdd) {
-                    Image(systemName: "doc.badge.plus").font(.system(size: 18, weight: .medium))
-                }
-                .buttonStyle(PressableStyle())
-                .accessibilityLabel("New Page")
-                Button(action: onClose) {
-                    Image(systemName: "xmark").font(.system(size: 17, weight: .semibold))
-                }
-                .buttonStyle(PressableStyle())
-                .accessibilityLabel("Close")
-            }
-            .foregroundStyle(Theme.action)
+            header
             HStack(spacing: 6) {
                 Text(title)
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                Text("\(count)")
+                Text(selecting ? "\(picked.count) of \(count) selected" : "\(count)")
                     .font(.footnote.weight(.semibold).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.5))
+                    .contentTransition(.numericText())
             }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.white.opacity(0.5))
@@ -338,29 +343,238 @@ struct PageSidebar: View {
                     }
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], spacing: 18) {
                         ForEach(shown, id: \.self) { i in
-                            PageThumb(index: i, template: template, paper: paper,
-                                      selected: i == current, image: thumbnail(i),
-                                      bookmarked: bookmarked(i), caption: outlineTitle(i),
-                                      onBookmark: { onToggleBookmark(i) },
-                                      menu: { pageMenu(i) })
-                                .id(i)
-                                .onTapGesture { onSelect(i) }
-                                .contextMenu { pageMenu(i) }
+                            thumb(i)
                         }
                     }
+                    .id(version)
                     // Room for the selection ring so it isn't clipped at the edges.
                     .padding(.vertical, 10)
                     .padding(.horizontal, 7)
+                    if canReorder {
+                        Text("Touch and hold a page, then drag it to move it.")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.35))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
                 }
                 .scrollIndicators(.hidden)
                 .onAppear { proxy.scrollTo(current, anchor: .center) }
             }
+            if selecting { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
         }
         .padding(18)
         .frame(width: 320)
         .frame(maxHeight: .infinity)
         .background(Color(hex: "#111113").ignoresSafeArea())
         .environment(\.colorScheme, .dark)
+        .animation(.snappy(duration: 0.22), value: selecting)
+        .confirmationDialog("Delete \(picked.count) page\(picked.count == 1 ? "" : "s")?",
+                            isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                onDeletePages(pickedSorted)
+                picked = []
+                selecting = false
+                version += 1
+            }
+        } message: {
+            Text("This can't be undone.")
+        }
+        .onChange(of: count) { _, _ in
+            picked = picked.filter { $0 < count }
+            version += 1
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 18) {
+            Button(action: onAllNotes) {
+                Image(systemName: "sidebar.left").font(.system(size: 18, weight: .medium))
+            }
+            .buttonStyle(PressableStyle())
+            .accessibilityLabel("All Notes")
+            Spacer()
+            Button {
+                selecting.toggle()
+                picked = []
+            } label: {
+                Text(selecting ? "Done" : "Select").font(.body.weight(.semibold))
+            }
+            .buttonStyle(PressableStyle())
+            if !selecting {
+                Button(action: onAdd) {
+                    Image(systemName: "doc.badge.plus").font(.system(size: 18, weight: .medium))
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel("New Page")
+            }
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.system(size: 17, weight: .semibold))
+            }
+            .buttonStyle(PressableStyle())
+            .accessibilityLabel("Close")
+        }
+        .foregroundStyle(Theme.action)
+    }
+
+    @ViewBuilder
+    private func thumb(_ i: Int) -> some View {
+        let base = PageThumb(index: i, template: template, paper: paper,
+                             selected: selecting ? picked.contains(i) : i == current, image: thumbnail(i),
+                             bookmarked: bookmarked(i), caption: outlineTitle(i),
+                             onBookmark: { onToggleBookmark(i) },
+                             menu: { pageMenu(i) })
+            .overlay(alignment: .bottomLeading) {
+                if selecting {
+                    Image(systemName: picked.contains(i) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(picked.contains(i) ? Theme.action : Color.gray.opacity(0.7))
+                        .background(Circle().fill(Color.white).padding(2))
+                        .padding(.leading, 6)
+                        .padding(.bottom, 30)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .overlay(alignment: .leading) {
+                // Where a dragged page will land.
+                if dropTarget == i {
+                    Capsule().fill(Theme.action).frame(width: 4).padding(.vertical, 6).offset(x: -11)
+                }
+            }
+            .id(i)
+            .onTapGesture {
+                if selecting {
+                    if picked.contains(i) { picked.remove(i) } else { picked.insert(i) }
+                } else {
+                    onSelect(i)
+                }
+            }
+        if canReorder {
+            base
+                .contextMenu { pageMenu(i) }
+                .draggable(Self.dragPrefix + String(i)) {
+                    PageThumb(index: i, template: template, paper: paper, selected: true, image: thumbnail(i),
+                              bookmarked: false, caption: nil, onBookmark: {}, menu: { EmptyView() })
+                        .frame(width: 120)
+                        .environment(\.colorScheme, .dark)
+                }
+                .dropDestination(for: String.self) { items, _ in
+                    dropTarget = nil
+                    guard let s = items.first, s.hasPrefix(Self.dragPrefix),
+                          let from = Int(s.dropFirst(Self.dragPrefix.count)), from != i, from < count else { return false }
+                    withAnimation(.snappy) {
+                        onMovePages([from], i)
+                        version += 1
+                    }
+                    return true
+                } isTargeted: { on in
+                    if on { dropTarget = i } else if dropTarget == i { dropTarget = nil }
+                }
+        } else if selecting {
+            base
+        } else {
+            base.contextMenu { pageMenu(i) }
+        }
+    }
+
+    private var selectionBar: some View {
+        let none = picked.isEmpty
+        return VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Button(picked.count == count ? "Select None" : "Select All") {
+                    picked = picked.count == count ? [] : Set(0..<count)
+                }
+                Spacer()
+                Button("Range…") {
+                    rangeFrom = (pickedSorted.first ?? current) + 1
+                    rangeTo = (pickedSorted.last ?? current) + 1
+                    showRange = true
+                }
+                .popover(isPresented: $showRange) { rangePicker }
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Theme.action)
+            HStack(spacing: 8) {
+                Menu {
+                    Button { move(to: 0) } label: { Label("To the Start", systemImage: "arrow.up.to.line") }
+                    Button { move(to: count) } label: { Label("To the End", systemImage: "arrow.down.to.line") }
+                    Button { movePosition = min(current + 1, count); showMoveTo = true } label: {
+                        Label("To Page…", systemImage: "arrow.up.arrow.down")
+                    }
+                } label: {
+                    barButton("arrow.up.arrow.down", "Move")
+                }
+                .popover(isPresented: $showMoveTo) { movePicker }
+                Button { onExportPages(pickedSorted) } label: { barButton("square.and.arrow.up", "Export") }
+                Button { confirmDelete = true } label: { barButton("trash", "Delete", tint: Color(hex: "#FF6B66")) }
+            }
+            .disabled(none)
+            .opacity(none ? 0.4 : 1)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.08)))
+    }
+
+    private func barButton(_ symbol: String, _ label: String, tint: Color = .white) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
+            Text(label).font(.caption2.weight(.semibold))
+        }
+        .foregroundStyle(tint)
+        .frame(maxWidth: .infinity)
+        .frame(height: 48)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.08)))
+        .contentShape(Rectangle())
+    }
+
+    private var rangePicker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Select Pages").font(.headline)
+            Stepper("From page \(rangeFrom)", value: $rangeFrom, in: 1...max(count, 1))
+            Stepper("To page \(rangeTo)", value: $rangeTo, in: 1...max(count, 1))
+            Button {
+                let a = min(rangeFrom, rangeTo) - 1, b = max(rangeFrom, rangeTo) - 1
+                picked = Set(a...b)
+                showRange = false
+            } label: {
+                Text("Select \(abs(rangeTo - rangeFrom) + 1) Pages").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(18)
+        .frame(width: 280)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private var movePicker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Move \(picked.count) Page\(picked.count == 1 ? "" : "s")").font(.headline)
+            Stepper("Before page \(movePosition)", value: $movePosition, in: 1...max(count, 1))
+            Button {
+                showMoveTo = false
+                // Position among the pages that stay, so the moved pages start where asked.
+                let before = pickedSorted.filter { $0 < movePosition - 1 }.count
+                move(to: movePosition - 1 - before)
+            } label: {
+                Text("Move").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(18)
+        .frame(width: 280)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private func move(to position: Int) {
+        let list = pickedSorted
+        guard !list.isEmpty else { return }
+        withAnimation(.snappy) {
+            onMovePages(list, position)
+            // The moved pages now sit together from `position`.
+            let start = max(0, min(position, count - list.count))
+            picked = Set(start..<(start + list.count))
+            version += 1
+        }
     }
 
     @ViewBuilder
@@ -377,6 +591,10 @@ struct PageSidebar: View {
         Divider()
         Button { onPageAction(i, .addBefore) } label: { Label("Add Page Before", systemImage: "arrow.up.doc") }
         Button { onPageAction(i, .addAfter) } label: { Label("Add Page After", systemImage: "arrow.down.doc") }
+        Button {
+            selecting = true
+            picked = [i]
+        } label: { Label("Select Pages", systemImage: "checkmark.circle") }
         Divider()
         Button(role: .destructive) { onPageAction(i, .delete) } label: { Label("Delete", systemImage: "trash") }
     }

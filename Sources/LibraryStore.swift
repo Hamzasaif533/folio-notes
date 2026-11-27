@@ -481,4 +481,13 @@ final class LibraryStore: ObservableObject {
         notebooks[i].pages = pages
         persist()
     }
+
+    /// Puts a notebook's pages in a new order (the same pages, rearranged).
+    func setPageOrder(notebookId: UUID, pages: [UUID]) {
+        guard let i = notebooks.firstIndex(where: { $0.id == notebookId }),
+              pages.count == notebooks[i].pages.count, Set(pages) == Set(notebooks[i].pages) else { return }
+        notebooks[i].pages = pages
+        notebooks[i].modifiedAt = Date()
+        persist()
+    }
 }

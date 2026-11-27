@@ -10,7 +10,7 @@ struct FolioApp: App {
         WindowGroup {
             LibraryView()
                 // A new theme redraws the whole library in its colours.
-                .id(themes.theme)
+                .id(themes.appearanceKey)
                 .environmentObject(store)
                 .environmentObject(tools)
                 .environmentObject(themes)

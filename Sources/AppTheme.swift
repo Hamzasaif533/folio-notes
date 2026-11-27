@@ -25,13 +25,47 @@ struct ThemePalette {
 /// App themes. Each one tints the library, the sidebar, buttons, the selected tool and
 /// the desk behind the pages; notebook covers and ink colours stay as you made them.
 enum AppTheme: String, CaseIterable, Identifiable {
+    // One colour: the whole library is tinted with the theme's own colour.
     case classic, redWine, latte, mocha, forest, ocean, lavender, rose, midnight
+    // Two colours: a main colour for buttons and highlights, on a background of another colour.
+    case pistachio, navySand, terracottaSage, plumPeach, tealBlush, mustardPine, cherryCream, lavenderSlate
+    /// Two colours you pick yourself.
+    case custom
 
     var id: String { rawValue }
 
     static let storageKey = "folio.theme"
     /// Set at launch and whenever a theme is picked.
     static var current: AppTheme = AppTheme(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? .classic
+
+    static let singleColour: [AppTheme] = [.classic, .redWine, .latte, .mocha, .forest, .ocean, .lavender, .rose, .midnight]
+    static let twoColour: [AppTheme] = [.pistachio, .navySand, .terracottaSage, .plumPeach, .tealBlush,
+                                        .mustardPine, .cherryCream, .lavenderSlate]
+
+    static let customMainKey = "folio.theme.customMain"
+    static let customBackgroundKey = "folio.theme.customBackground"
+    static var customMain = UserDefaults.standard.string(forKey: customMainKey) ?? "#6E9B4E" { didSet { revision += 1 } }
+    static var customBackground = UserDefaults.standard.string(forKey: customBackgroundKey) ?? "#8B5E3C" {
+        didSet { revision += 1 }
+    }
+    /// Changes whenever the custom colours do, so cached colours get worked out again.
+    private(set) static var revision = 0
+
+    /// Main colour and background colour of a two-colour theme.
+    var duo: (main: String, background: String)? {
+        switch self {
+        case .pistachio: return ("#6E9B4E", "#8B5E3C")
+        case .navySand: return ("#24406E", "#C8A96E")
+        case .terracottaSage: return ("#B95A38", "#7F9A7A")
+        case .plumPeach: return ("#6D3B6E", "#EBA27F")
+        case .tealBlush: return ("#1F7A7A", "#DFA0A4")
+        case .mustardPine: return ("#B07D12", "#2F5D4A")
+        case .cherryCream: return ("#B3243B", "#DCC79B")
+        case .lavenderSlate: return ("#7A5FB0", "#6F7785")
+        case .custom: return (Self.customMain, Self.customBackground)
+        default: return nil
+        }
+    }
 
     var title: String {
         switch self {
@@ -44,6 +78,15 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .lavender: return "Lavender"
         case .rose: return "Rose"
         case .midnight: return "Midnight"
+        case .pistachio: return "Pistachio"
+        case .navySand: return "Navy & Sand"
+        case .terracottaSage: return "Terracotta & Sage"
+        case .plumPeach: return "Plum & Peach"
+        case .tealBlush: return "Teal & Blush"
+        case .mustardPine: return "Mustard & Pine"
+        case .cherryCream: return "Cherry & Cream"
+        case .lavenderSlate: return "Lavender & Slate"
+        case .custom: return "Your Colours"
         }
     }
 
@@ -58,10 +101,20 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .lavender: return "Soft purple"
         case .rose: return "Dusty pink"
         case .midnight: return "Navy and gold"
+        case .pistachio: return "Green on brown"
+        case .navySand: return "Navy on warm sand"
+        case .terracottaSage: return "Clay on sage green"
+        case .plumPeach: return "Plum on peach"
+        case .tealBlush: return "Teal on blush pink"
+        case .mustardPine: return "Mustard on pine green"
+        case .cherryCream: return "Cherry red on cream"
+        case .lavenderSlate: return "Lavender on slate grey"
+        case .custom: return "Pick a main and a background"
         }
     }
 
     var palette: ThemePalette {
+        if let d = duo { return .duo(main: d.main, background: d.background) }
         switch self {
         case .classic:
             return ThemePalette(accent: ("#E8714F", "#EC8264"), action: ("#18AFC9", "#2BBFD8"),
@@ -99,7 +152,30 @@ enum AppTheme: String, CaseIterable, Identifiable {
             return ThemePalette(accent: ("#C8962E", "#E8B54D"), action: ("#3F6FD8", "#6E9BFF"),
                                 background: ("#EEF1F7", "#0A0F1C"), sidebar: ("#E1E6F1", "#131A2C"),
                                 tile: ("#FFFFFF", "#1C2540"), desk: ("#DADFEA", "#0E1426"))
+        default:
+            return AppTheme.classic.palette
         }
+    }
+}
+
+extension ThemePalette {
+    /// A two-colour theme: `main` for buttons and highlights, `background` tinting everything
+    /// behind them (light in light mode, deep in dark mode).
+    static func duo(main: String, background bg: String) -> ThemePalette {
+        func mix(_ a: String, _ b: String, _ t: CGFloat) -> String {
+            var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+            var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+            UIColor(hex: a).getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
+            UIColor(hex: b).getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
+            return UIColor(red: r1 + (r2 - r1) * t, green: g1 + (g2 - g1) * t, blue: b1 + (b2 - b1) * t, alpha: 1).hexString
+        }
+        let white = "#FFFFFF", black = "#000000"
+        return ThemePalette(accent: (main, mix(main, white, 0.22)),
+                            action: (mix(main, black, 0.06), mix(main, white, 0.32)),
+                            background: (mix(bg, white, 0.72), mix(bg, black, 0.8)),
+                            sidebar: (mix(bg, white, 0.55), mix(bg, black, 0.68)),
+                            tile: (mix(bg, white, 0.9), mix(bg, black, 0.56)),
+                            desk: (mix(bg, white, 0.45), mix(bg, black, 0.75)))
     }
 }
 
@@ -132,8 +208,27 @@ final class ThemeCenter: ObservableObject {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey) }
     }
     @Published var showPicker = false
+    /// Your Colours: the main colour and the background colour.
+    @Published var customMain: String {
+        didSet {
+            AppTheme.customMain = customMain
+            UserDefaults.standard.set(customMain, forKey: AppTheme.customMainKey)
+        }
+    }
+    @Published var customBackground: String {
+        didSet {
+            AppTheme.customBackground = customBackground
+            UserDefaults.standard.set(customBackground, forKey: AppTheme.customBackgroundKey)
+        }
+    }
+    /// Redraw key for the whole app: the theme, plus the custom colours when they're in use.
+    var appearanceKey: String {
+        theme == .custom ? "\(theme.rawValue)-\(customMain)-\(customBackground)" : theme.rawValue
+    }
 
     init() {
+        customMain = AppTheme.customMain
+        customBackground = AppTheme.customBackground
         theme = AppTheme.current
         appearance = Appearance(rawValue: UserDefaults.standard.string(forKey: Self.appearanceKey) ?? "") ?? .system
     }
@@ -155,14 +250,10 @@ struct ThemePickerView: View {
                     }
                     .pickerStyle(.segmented)
 
-                    LazyVGrid(columns: columns, spacing: 18) {
-                        ForEach(AppTheme.allCases) { t in
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.3)) { center.theme = t }
-                            } label: { ThemeCard(theme: t, selected: center.theme == t) }
-                            .buttonStyle(PressableStyle(scale: 0.96))
-                        }
-                    }
+                    section("One Colour", "The whole library in one colour.", AppTheme.singleColour)
+                    section("Two Colours", "A main colour for buttons and highlights, on a background of another.",
+                            AppTheme.twoColour)
+                    customCard
                 }
                 .padding(24)
             }
@@ -175,6 +266,65 @@ struct ThemePickerView: View {
         }
         .tint(Theme.accent)
         .presentationDetents([.large])
+    }
+
+    private func section(_ title: String, _ detail: String, _ themes: [AppTheme]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 22, weight: .regular, design: .serif))
+                Text(detail).font(.subheadline).foregroundStyle(.secondary)
+            }
+            LazyVGrid(columns: columns, spacing: 18) {
+                ForEach(themes) { t in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.3)) { center.theme = t }
+                    } label: { ThemeCard(theme: t, selected: center.theme == t) }
+                    .buttonStyle(PressableStyle(scale: 0.96))
+                }
+            }
+        }
+    }
+
+    /// Your Colours: pick any main colour and any background colour.
+    private var customCard: some View {
+        let main = Binding<Color>(
+            get: { Color(hex: center.customMain) },
+            set: { c in
+                center.customMain = UIColor(c).hexString
+                center.theme = .custom
+            })
+        let back = Binding<Color>(
+            get: { Color(hex: center.customBackground) },
+            set: { c in
+                center.customBackground = UIColor(c).hexString
+                center.theme = .custom
+            })
+        return VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Your Colours").font(.system(size: 22, weight: .regular, design: .serif))
+                Text("Pick a main colour and a background colour.").font(.subheadline).foregroundStyle(.secondary)
+            }
+            HStack(alignment: .top, spacing: 18) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.3)) { center.theme = .custom }
+                } label: { ThemeCard(theme: .custom, selected: center.theme == .custom) }
+                .buttonStyle(PressableStyle(scale: 0.96))
+                .frame(maxWidth: 260)
+                VStack(alignment: .leading, spacing: 14) {
+                    ColorPicker(selection: main, supportsOpacity: false) {
+                        Label("Main", systemImage: "circle.lefthalf.filled")
+                    }
+                    ColorPicker(selection: back, supportsOpacity: false) {
+                        Label("Background", systemImage: "square.fill")
+                    }
+                    Text("Tip: a deep main colour on a soft background is easiest to read.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Theme.tileFill))
+            }
+        }
     }
 }
 

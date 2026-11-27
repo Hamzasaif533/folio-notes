@@ -578,18 +578,64 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             saveAll()
             return
         }
+        dropPage(at: i)
+        finishRemoving(currentAfter: i)
+    }
+
+    private func dropPage(at i: Int) {
         let pv = pageViews.remove(at: i)
         saveTasks[pv.pageId]?.cancel()
         dirty.remove(pv.pageId)
         pv.removeFromSuperview()
         store.deletePage(notebookId: notebook.id, pageId: pv.pageId)
+    }
+
+    private func finishRemoving(currentAfter i: Int) {
         if let fresh = store.notebook(notebook.id) { notebook = fresh }
         undo.removeAllActions()
         onUndoChanged?(false, false)
         layoutPages()
-        currentPage = min(i, pageViews.count - 1)
+        currentPage = max(0, min(i, pageViews.count - 1))
         scrollTo(page: currentPage, animated: false)
         reportPage(force: true)
+        onPageChanged?(currentPage, pageViews.count)
+    }
+
+    /// Deletes several pages at once (all of them leaves one empty page).
+    func deletePages(_ indices: [Int]) {
+        let set = Set(indices.filter { pageViews.indices.contains($0) })
+        guard !set.isEmpty else { return }
+        closeZoomBox()
+        if set.count >= pageViews.count {
+            for i in stride(from: pageViews.count - 1, through: 1, by: -1) { dropPage(at: i) }
+            finishRemoving(currentAfter: 0)
+            deletePage(at: 0) // clears the one that's left
+            return
+        }
+        for i in set.sorted(by: >) { dropPage(at: i) }
+        finishRemoving(currentAfter: set.min() ?? 0)
+    }
+
+    /// Moves pages (kept in their order) so the first of them ends up at `position`,
+    /// counted among the pages that aren't moving.
+    func movePages(_ indices: [Int], to position: Int) {
+        let set = Set(indices.filter { pageViews.indices.contains($0) })
+        guard !set.isEmpty, set.count < pageViews.count || position == 0 else { return }
+        closeZoomBox()
+        saveAll()
+        let keep = pageViews.indices.contains(currentPage) ? pageViews[currentPage].pageId : nil
+        let moving = pageViews.indices.filter { set.contains($0) }.map { pageViews[$0] }
+        var rest = pageViews.indices.filter { !set.contains($0) }.map { pageViews[$0] }
+        rest.insert(contentsOf: moving, at: max(0, min(position, rest.count)))
+        guard rest.map(\.pageId) != pageViews.map(\.pageId) else { return }
+        pageViews = rest
+        store.setPageOrder(notebookId: notebook.id, pages: pageViews.map(\.pageId))
+        if let fresh = store.notebook(notebook.id) { notebook = fresh }
+        layoutPages()
+        if let keep, let idx = pageViews.firstIndex(where: { $0.pageId == keep }) { currentPage = idx }
+        scrollTo(page: currentPage, animated: false)
+        reportPage(force: true)
+        onPageChanged?(currentPage, pageViews.count)
     }
 
     /// Pastes a copied page (possibly from another notebook) at `index`.
@@ -659,6 +705,12 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     func pageContents() -> [PageContent] {
         saveAll()
         return pageViews.map(\.content)
+    }
+
+    /// Just these pages, in page order (exporting a selection or a range).
+    func pageContents(_ indices: [Int]) -> [PageContent] {
+        saveAll()
+        return Set(indices).sorted().filter { pageViews.indices.contains($0) }.map { pageViews[$0].content }
     }
 
     private var imageLoader: (String) -> UIImage? {
