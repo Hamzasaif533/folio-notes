@@ -380,6 +380,8 @@ struct EditorView: View {
         }
         .animation(.easeOut(duration: 0.2), value: showPageBadge)
         .animation(.easeOut(duration: 0.2), value: tools.tool.hasContextBar)
+        // The bars are see-through, so their icons follow the paper, not the system theme.
+        .environment(\.colorScheme, currentNotebook.paper == .dark ? .dark : .light)
     }
 
     private func dock(of bar: BarKind) -> ToolbarDock { bar == .tools ? toolsDock : colorsDock }

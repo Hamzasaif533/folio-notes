@@ -53,11 +53,11 @@ struct MenuRowLabel: View {
             HStack(spacing: 14) {
                 Image(systemName: icon)
                     .font(.system(size: 19))
-                    .foregroundStyle(destructive ? Color.red : menuAccent)
+                    .foregroundStyle(destructive ? Color(red: 1, green: 0.42, blue: 0.40) : menuAccent)
                     .frame(width: 26)
                 Text(title)
                     .font(.system(size: 17))
-                    .foregroundStyle(destructive ? Color.red : Color.white)
+                    .foregroundStyle(destructive ? Color(red: 1, green: 0.42, blue: 0.40) : Color.white)
                 Spacer(minLength: 8)
                 if let detail {
                     Text(detail).font(.system(size: 16)).foregroundStyle(.white.opacity(0.5))

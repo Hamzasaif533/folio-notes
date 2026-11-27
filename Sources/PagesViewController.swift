@@ -697,6 +697,9 @@ final class ZoomBox: NSObject {
     let page: PageView
     let panel = UIView()
     let canvas = PKCanvasView()
+    /// The page's lines (or imported background), shown behind the magnified ink.
+    private let paperClip = UIView()
+    private let paperImage = UIImageView()
     let frameView = UIView()
     /// Finger handle for moving the box (the box itself lets the pencil write through).
     let grip = UIView()
@@ -718,7 +721,16 @@ final class ZoomBox: NSObject {
         panel.layer.shadowOpacity = 0.25
         panel.layer.shadowRadius = 16
 
-        canvas.backgroundColor = page.paper.uiColor
+        paperClip.backgroundColor = page.paper.uiColor
+        paperClip.layer.cornerRadius = 14
+        paperClip.clipsToBounds = true
+        paperClip.isUserInteractionEnabled = false
+        paperImage.image = page.backgroundView.image ?? Self.templateImage(page)
+        paperImage.contentMode = page.backgroundView.image == nil ? .scaleToFill : .scaleAspectFit
+        paperClip.addSubview(paperImage)
+        panel.addSubview(paperClip)
+        canvas.backgroundColor = .clear
+        canvas.isOpaque = false
         canvas.overrideUserInterfaceStyle = .light
         canvas.isScrollEnabled = false
         canvas.bounces = false
@@ -768,6 +780,7 @@ final class ZoomBox: NSObject {
                              width: w, height: Self.panelHeight)
         let canvasFrame = CGRect(x: 14, y: 14, width: w - 14 * 3 - 46, height: Self.panelHeight - 28)
         canvas.frame = canvasFrame
+        paperClip.frame = canvasFrame
         for i in 0..<4 {
             panel.viewWithTag(100 + i)?.frame = CGRect(x: w - 14 - 46, y: 14 + CGFloat(i) * 56, width: 46, height: 46)
         }
@@ -790,6 +803,17 @@ final class ZoomBox: NSObject {
         canvas.pinchGestureRecognizer?.isEnabled = false
         canvas.contentSize = CGSize(width: TemplateRenderer.pageSize.width * zoom, height: TemplateRenderer.pageSize.height * zoom)
         canvas.contentOffset = CGPoint(x: region.minX * zoom, y: region.minY * zoom)
+        let ps = TemplateRenderer.pageSize
+        paperImage.frame = CGRect(x: -region.minX * zoom, y: -region.minY * zoom, width: ps.width * zoom, height: ps.height * zoom)
+    }
+
+    private static func templateImage(_ page: PageView) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2.5
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: TemplateRenderer.pageSize, format: format).image { ctx in
+            TemplateRenderer.draw(template: page.template, paper: page.paper, in: ctx.cgContext)
+        }
     }
 
     private func clampRegion() {
