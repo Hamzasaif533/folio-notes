@@ -181,7 +181,7 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .ballpoint: return "Smooth"
-        case .fountain: return "Pressure + angle"
+        case .fountain: return "Flat nib, crisp"
         case .pencil: return "Textured"
         case .monoline: return "Even width"
         case .brush: return "Soft & wet"
@@ -203,7 +203,7 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
     /// The Folio pen that draws this kind.
     var inkStyle: InkStyle {
         switch self {
-        case .fountain: return .fountain
+        case .fountain: return .nib
         case .brush: return .brush
         default: return .ballpoint
         }
@@ -212,7 +212,7 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
     /// How each pen feels out of the box (sharpness, pressure, flatness, stabilization).
     var defaultFeel: InkFeel {
         switch self {
-        case .fountain: return InkFeel(tipSharpness: 0.35, pressure: 0.6, tipFlatness: 0, stabilization: 0.1)
+        case .fountain: return InkFeel(tipSharpness: 0, pressure: 0.4, tipFlatness: 0, stabilization: 0.15)
         default: return InkFeel(tipSharpness: 0.1, pressure: 0.25, tipFlatness: 0, stabilization: 0.05)
         }
     }
@@ -334,8 +334,8 @@ final class ToolState: ObservableObject {
         var tapeQuickSizes: [CGFloat]?
         // Added in 1.7.
         var penFeels: [String: InkFeel]?
-        // Added in 1.8: the fountain pen was reworked, so its old feel is dropped once.
-        var fountainV2: Bool?
+        // Added in 1.9 (was fountainV2 in 1.8): the fountain pen was reworked, so its old feel is dropped once.
+        var fountainV3: Bool?
         var eraserReturns: Bool?
     }
 
@@ -366,7 +366,7 @@ final class ToolState: ObservableObject {
             tapeQuickSizes = Self.three(s.tapeQuickSizes, Self.defaultTapeSizes)
             penFeels = s.penFeels ?? [:]
             eraserReturns = s.eraserReturns ?? true
-            resetFountain = s.fountainV2 == nil
+            resetFountain = s.fountainV3 == nil
             toolbarItems = s.toolbarItems.map { $0.compactMap(ToolbarItemKind.init(rawValue:)) } ?? ToolbarItemKind.defaults
         } else {
             textColorHex = "#1C1C1E"
@@ -417,7 +417,7 @@ final class ToolState: ObservableObject {
                       textColorHex: textColorHex, textSize: textSize,
                       tapeColorHex: tapeColorHex, tapeWidth: tapeWidth,
                       toolbarItems: toolbarItems.map { $0.rawValue },
-                      tapeQuickSizes: tapeQuickSizes, penFeels: penFeels, fountainV2: true, eraserReturns: eraserReturns)
+                      tapeQuickSizes: tapeQuickSizes, penFeels: penFeels, fountainV3: true, eraserReturns: eraserReturns)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }

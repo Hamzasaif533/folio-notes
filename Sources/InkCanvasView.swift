@@ -397,7 +397,7 @@ final class InkCanvasView: UIView {
             for p in predicted { pts.append(InkPoint(location(p), w: last.width)) }
         }
         liveLayer.path = pen.style == .highlighter ? InkRenderer.centerline(pts)
-                                                   : InkRenderer.outline(pen.tapered(pts, end: false))
+                                                   : InkRenderer.shape(pen.tapered(pts, end: false), style: pen.style)
     }
 
     private func finishStroke(pen: InkPen) {
@@ -419,7 +419,7 @@ final class InkCanvasView: UIView {
         let glow = CAShapeLayer()
         glow.actions = liveLayer.actions
         configure(glow, pen: pen)
-        glow.path = pen.style == .highlighter ? InkRenderer.centerline(stroke.points) : InkRenderer.outline(stroke.points)
+        glow.path = pen.style == .highlighter ? InkRenderer.centerline(stroke.points) : InkRenderer.shape(stroke.points, style: stroke.style)
         overlay.layer.insertSublayer(glow, below: liveLayer)
         liveLayer.path = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { glow.removeFromSuperlayer() }
@@ -543,7 +543,7 @@ final class InkCanvasView: UIView {
         fadeAndRemove(scribble, duration: 0.25)
         for s in hit.prefix(80) {
             let l = CAShapeLayer()
-            l.path = s.style == .highlighter ? InkRenderer.centerline(s.points) : InkRenderer.outline(s.points)
+            l.path = s.style == .highlighter ? InkRenderer.centerline(s.points) : InkRenderer.shape(s.points, style: s.style)
             l.contentsScale = sharpness()
             if s.style == .highlighter {
                 l.fillColor = nil
@@ -587,7 +587,7 @@ final class InkCanvasView: UIView {
 
         // The ink circle fades as a dashed selection loop runs around it.
         let ink = CAShapeLayer()
-        ink.path = InkRenderer.outline(circle.points)
+        ink.path = InkRenderer.shape(circle.points, style: circle.style)
         ink.fillColor = circle.color.uiColor.cgColor
         ink.contentsScale = sharpness()
         overlay.layer.addSublayer(ink)

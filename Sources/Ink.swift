@@ -10,6 +10,9 @@ enum InkStyle: UInt8 {
     case highlighter = 2
     /// Soft brush: very pressure sensitive, pointed ends.
     case brush = 3
+    /// Flat calligraphy nib held at a fixed angle: thick downstrokes, hairline sideways strokes,
+    /// crisp angled ends (the fountain pen since 1.9).
+    case nib = 4
 }
 
 /// One sampled point of a stroke, in page units, with the line width at that point.
@@ -248,6 +251,10 @@ struct InkPen: Equatable {
             let pe = sin(min(max(p, 0), 1) * .pi / 2)
             w = width * max(1 - 0.7 * k + 1.25 * k * pe, 0.2)
         case .brush: w = width * max(1 - 1.5 * k + 2.6 * k * p, 0.06)
+        case .nib:
+            // Width here is the nib's length; the stroke's thickness comes from its direction.
+            let pe = sin(min(max(p, 0), 1) * .pi / 2)
+            return width * 1.35 * max(1 - 0.5 * k + 0.8 * k * pe, 0.3)
         default: w = width * max(1 - 0.56 * k + 1.12 * k * p, 0.12)
         }
         // A nib held at 45°: thin going one way, full going the other.
@@ -352,6 +359,49 @@ enum InkRenderer {
         return path
     }
 
+    /// The filled shape of a stroke in its pen's style.
+    static func shape(_ pts: [InkPoint], style: InkStyle) -> CGPath {
+        style == .nib ? nibOutline(pts) : outline(pts)
+    }
+
+    /// The flat nib's angle: its edge rises to the right, so it's thin travelling up-right
+    /// and thickest going straight down.
+    static let nibAngle: CGFloat = -22 * .pi / 180
+    /// Thickness of the nib itself (its hairline), as a share of its length.
+    static let nibThickness: CGFloat = 0.11
+
+    /// A flat nib dragged along the line: the nib (a thin rectangle) at every point, joined by
+    /// the band its edge sweeps between points. All wound the same way so they merge cleanly.
+    static func nibOutline(_ pts: [InkPoint]) -> CGPath {
+        let path = CGMutablePath()
+        guard !pts.isEmpty else { return path }
+        let avg = CGFloat(pts.reduce(Float(0)) { $0 + $1.w }) / CGFloat(pts.count)
+        let dense = densify(pts, spacing: max(0.2, min(0.9, avg * nibThickness * 0.7)))
+        let ux = cos(nibAngle), uy = sin(nibAngle)
+        let nx = -uy, ny = ux
+        func add(_ q: [CGPoint]) {
+            var q = q
+            if signedArea(q) < 0 { q.reverse() }
+            path.addLines(between: q)
+            path.closeSubpath()
+        }
+        for i in dense.indices {
+            let p = dense[i].cg
+            let hl = max(dense[i].width / 2, 0.3)
+            let ht = max(hl * 2 * nibThickness / 2, 0.18)
+            let hx = ux * hl, hy = uy * hl, kx = nx * ht, ky = ny * ht
+            add([CGPoint(x: p.x - hx - kx, y: p.y - hy - ky), CGPoint(x: p.x + hx - kx, y: p.y + hy - ky),
+                 CGPoint(x: p.x + hx + kx, y: p.y + hy + ky), CGPoint(x: p.x - hx + kx, y: p.y - hy + ky)])
+            guard i > 0 else { continue }
+            let a = dense[i - 1].cg
+            guard hypot(p.x - a.x, p.y - a.y) > 0.0001 else { continue }
+            let ha = max(dense[i - 1].width / 2, 0.3)
+            add([CGPoint(x: a.x - ux * ha, y: a.y - uy * ha), CGPoint(x: a.x + ux * ha, y: a.y + uy * ha),
+                 CGPoint(x: p.x + hx, y: p.y + hy), CGPoint(x: p.x - hx, y: p.y - hy)])
+        }
+        return path
+    }
+
     /// The filled shape of a pen stroke whose width changes along the way: a disc at every
     /// point joined by bands, all wound the same way so they merge into one shape.
     static func outline(_ pts: [InkPoint]) -> CGPath {
@@ -430,7 +480,7 @@ final class OutlineCache {
         lock.lock()
         if let p = paths[s.id] { lock.unlock(); return p }
         lock.unlock()
-        let p = InkRenderer.outline(s.points)
+        let p = InkRenderer.shape(s.points, style: s.style)
         lock.lock()
         if paths.count > 6000 { paths.removeAll(keepingCapacity: true) }
         paths[s.id] = p

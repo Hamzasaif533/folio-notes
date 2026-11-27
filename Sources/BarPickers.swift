@@ -25,7 +25,8 @@ struct PenTypePicker: View {
                     VStack(spacing: 16) {
                         feel("Tip Sharpness", \.tipSharpness)
                         feel("Pressure Sensitivity", \.pressure)
-                        feel("Tip Flatness", \.tipFlatness)
+                        // The fountain pen's flat nib has its own fixed shape.
+                        if tools.pen.kind != .fountain { feel("Tip Flatness", \.tipFlatness) }
                         feel("Stroke Stabilization", \.stabilization)
                         if tools.pen.inkFeel != tools.pen.kind.defaultFeel {
                             Button {
