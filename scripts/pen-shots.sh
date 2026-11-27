@@ -21,7 +21,7 @@ shot() {
   local name=$1; shift
   xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true
   xcrun simctl launch "$DEVICE" "$BUNDLE" -FolioDemo "$@"
-  sleep 8
+  sleep ${SHOT_WAIT:-8}
   xcrun simctl io "$DEVICE" screenshot "shots/$name.png"
   echo "saved $name"
 }
@@ -37,7 +37,7 @@ shot "08-settings" -FolioSettings
 shot "10-features" -FolioFeatures
 shot "11-pdf-dark" -FolioPDFTest -FolioDarkPDF
 shot "12-calculator" -FolioOpenFirst -FolioCalc
-shot "13-browser" -FolioOpenFirst -FolioBrowser
+SHOT_WAIT=25 shot "13-browser" -FolioOpenFirst -FolioBrowser
 shot "14-paper-sheet" -FolioFeatures -FolioPaper
 xcrun simctl ui "$DEVICE" appearance dark
 shot "09-pen-test-dark" -FolioPenTest

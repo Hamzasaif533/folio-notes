@@ -45,21 +45,32 @@ final class PDFBackground {
         let s = min(rect.width / shown.width, rect.height / shown.height)
         let fitted = CGRect(x: rect.midX - shown.width * s / 2, y: rect.midY - shown.height * s / 2,
                             width: shown.width * s, height: shown.height * s)
+        func drawPage(blend: CGBlendMode) {
+            ctx.saveGState()
+            ctx.clip(to: fitted)
+            ctx.translateBy(x: rect.midX, y: rect.midY)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.rotate(by: -CGFloat(rotation) * .pi / 180)
+            ctx.scaleBy(x: s, y: s)
+            ctx.translateBy(x: -b.midX, y: -b.midY)
+            ctx.clip(to: b)
+            ctx.interpolationQuality = .high
+            ctx.setRenderingIntent(.defaultIntent)
+            ctx.setBlendMode(blend)
+            ctx.drawPDFPage(page)
+            ctx.restoreGState()
+        }
         ctx.saveGState()
         ctx.setFillColor(UIColor.white.cgColor)
         ctx.fill(fitted)
-        ctx.clip(to: fitted)
-        ctx.translateBy(x: rect.midX, y: rect.midY)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.rotate(by: -CGFloat(rotation) * .pi / 180)
-        ctx.scaleBy(x: s, y: s)
-        ctx.translateBy(x: -b.midX, y: -b.midY)
-        ctx.clip(to: b)
-        ctx.interpolationQuality = .high
-        ctx.setRenderingIntent(.defaultIntent)
-        ctx.drawPDFPage(page)
         ctx.restoreGState()
-        if dark { PDFBackground.darken(fitted, ctx: ctx) }
+        drawPage(blend: .normal)
+        if dark {
+            PDFBackground.darken(fitted, ctx: ctx)
+            // Inverting turns red into cyan; drawing the page again as "hue" gives every
+            // colour back its own hue, keeping the dark version's lightness.
+            drawPage(blend: .hue)
+        }
     }
 
     /// Turns what's already drawn in `rect` into its dark version.
