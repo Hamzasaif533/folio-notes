@@ -136,14 +136,17 @@ struct PenSettingsView: View {
                         } label: {
                             VStack(spacing: 4) {
                                 Image(systemName: k.symbol).font(.system(size: 20))
-                                Text(k.title).font(.caption.weight(.medium))
-                                Text(k.subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                                    .foregroundStyle(selected ? Theme.action : Color.primary)
+                                Text(k.title).font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.primary)
+                                Text(k.subtitle).font(.caption2)
+                                    .foregroundStyle(Color.secondary)
+                                    .lineLimit(1)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 9)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Theme.accent.opacity(0.14) : Color.secondary.opacity(0.08)))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? Theme.accent : Color.clear, lineWidth: 1.5))
-                            .foregroundStyle(selected ? Theme.accent : Color.primary)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Theme.action.opacity(0.16) : Color.secondary.opacity(0.1)))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? Theme.action : Color.clear, lineWidth: 2))
                         }
                         .buttonStyle(.plain)
                     }
@@ -214,6 +217,7 @@ struct PenSettingsView: View {
             }
             .padding(18)
         }
+        .tint(Theme.action)
         .frame(width: 360, height: 640)
     }
 

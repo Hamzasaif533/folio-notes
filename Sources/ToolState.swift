@@ -22,12 +22,12 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .ballpoint: return "Smooth, slight pressure"
+        case .ballpoint: return "Smooth"
         case .fountain: return "Pressure + angle"
-        case .pencil: return "Textured, tilt shading"
-        case .monoline: return "No pressure, even line"
-        case .brush: return "Soft, wet brush"
-        case .crayon: return "Waxy texture"
+        case .pencil: return "Textured"
+        case .monoline: return "Even width"
+        case .brush: return "Soft & wet"
+        case .crayon: return "Waxy"
         }
     }
 

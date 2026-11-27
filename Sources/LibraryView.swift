@@ -306,26 +306,17 @@ struct NotesGridView: View {
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search notes")
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            ToolbarItem(placement: .topBarTrailing) {
                 if selection == .trash {
                     Button("Empty Trash", role: .destructive) { confirmEmptyTrash = true }
                         .disabled(store.trashedNotebooks.isEmpty)
+                } else if selection == .folders {
+                    ProminentButton(title: "New Folder", systemImage: "plus", action: onNewFolder)
                 } else {
-                    Menu {
-                        Button { onNewNotebook(currentFolderId) } label: {
-                            Label("New Notebook", systemImage: "book.closed")
-                        }
-                        Button(action: onNewFolder) {
-                            Label("New Folder", systemImage: "folder.badge.plus")
-                        }
-                    } label: {
-                        Label("New", systemImage: "plus")
-                            .labelStyle(.titleAndIcon)
-                            .fontWeight(.semibold)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.action)
+                    ProminentButton(title: "New", systemImage: "plus") { onNewNotebook(currentFolderId) }
                 }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker("Sort By", selection: $sortRaw) {
                         ForEach(SortOrder.allCases) { s in Text(s.title).tag(s.rawValue) }
@@ -447,6 +438,31 @@ struct NotesGridView: View {
             Button { store.duplicateNotebook(nb.id) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
             Divider()
             Button(role: .destructive) { store.moveToTrash(nb.id) } label: { Label("Move to Trash", systemImage: "trash") }
+        }
+    }
+}
+
+/// Filled cyan "+ New" button (tinted Liquid Glass on iPadOS 26).
+struct ProminentButton: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        let button = Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+        }
+        .tint(Theme.action)
+        if #available(iOS 26.0, *) {
+            button.buttonStyle(.glassProminent)
+        } else {
+            button.buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
         }
     }
 }

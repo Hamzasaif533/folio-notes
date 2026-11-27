@@ -170,7 +170,10 @@ struct FolderCard: View {
                 }
                 .offset(y: -42)
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(LinearGradient(colors: [base, base.opacity(0.82)], startPoint: .top, endPoint: .bottom))
+                    .fill(base)
+                    .overlay(RoundedRectangle(cornerRadius: 14)
+                        .fill(LinearGradient(colors: [.white.opacity(0.12), .black.opacity(0.10)],
+                                             startPoint: .top, endPoint: .bottom)))
                     .frame(height: 92)
                     .overlay(alignment: .bottomLeading) {
                         HStack {
