@@ -217,6 +217,8 @@ struct FloatingBrowser: View {
                         .onEnded { _ in dragFrom = nil })
                 ZStack(alignment: .top) {
                     WebView(model: web)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
                     if web.progress > 0, web.progress < 1 {
                         ProgressView(value: web.progress)
                             .progressViewStyle(.linear)
@@ -325,6 +327,8 @@ final class WebModel: NSObject, ObservableObject {
     override init() {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
+        // The panel is phone-sized, so pages get their phone layout (the desktop layout overflowed it).
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
         webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
         super.init()
