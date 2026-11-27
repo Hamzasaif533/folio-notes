@@ -298,6 +298,9 @@ final class InkCanvasView: UIView {
     private var smoothedWidth: CGFloat = 0
     private var direction: CGFloat = 0
     private var lastTime: TimeInterval = 0
+    /// How fast the Pencil is moving (screen points a second, smoothed), for the pointed tail on a quick lift.
+    private var moveSpeed: CGFloat = 0
+    private var speedSample: (at: CGPoint, time: TimeInterval)?
     private var snap: ((CGPoint) -> CGPoint)?
 
     private func beginStroke(_ t: UITouch, pen: InkPen) {
@@ -307,6 +310,8 @@ final class InkCanvasView: UIView {
         smoothedWidth = 0
         direction = 0
         lastTime = t.timestamp
+        moveSpeed = 0
+        speedSample = nil
         snap = rulerSnap?(self, t.preciseLocation(in: self))
         configure(liveLayer, pen: pen)
         addPoint(t, pen: pen)
@@ -324,6 +329,7 @@ final class InkCanvasView: UIView {
 
     private func addPoint(_ t: UITouch, pen: InkPen) {
         var loc = location(t)
+        trackSpeed(t)
         let s = CGFloat(pen.feel.stabilization)
         if s > 0.01, let prev = steady {
             let a = 1 - 0.85 * min(s, 1)
@@ -332,6 +338,24 @@ final class InkCanvasView: UIView {
         steady = loc
         if let last = points.last, hypot(last.cg.x - loc.x, last.cg.y - loc.y) < 0.25 / ds { return }
         points.append(InkPoint(loc, w: width(for: t, at: loc, pen: pen)))
+    }
+
+    private func trackSpeed(_ t: UITouch) {
+        // The lift itself often repeats the last spot, so it says nothing about speed, except
+        // that a Pencil held still for a moment before lifting sends nothing at all.
+        if t.phase == .ended {
+            if let s = speedSample, t.timestamp - s.time > 0.06 { moveSpeed = 0 }
+            return
+        }
+        let p = t.preciseLocation(in: self)
+        if let s = speedSample {
+            let dt = t.timestamp - s.time
+            guard dt > 0.002 else { return }
+            let v = hypot(p.x - s.at.x, p.y - s.at.y) * ds / CGFloat(dt)
+            // Quick to notice a stop, so stopping before lifting leaves a round end.
+            moveSpeed += (v - moveSpeed) * (v < moveSpeed ? 0.6 : 0.4)
+        }
+        speedSample = (p, t.timestamp)
     }
 
     /// With steadiness on, the line still ends where the Pencil lifted.
@@ -351,7 +375,7 @@ final class InkCanvasView: UIView {
         if let last = points.last {
             let dx = loc.x - last.cg.x, dy = loc.y - last.cg.y
             if hypot(dx, dy) > 0.6 / ds { direction = atan2(dy, dx) }
-            if t.type != .pencil, pen.style == .fountain {
+            if t.type != .pencil, pen.style == .fountain || pen.style == .oval {
                 // Fingers have no pressure: a quick line is a thin line.
                 let dt = max(t.timestamp - lastTime, 0.001)
                 let speed = hypot(dx, dy) * ds / CGFloat(dt)
@@ -397,7 +421,7 @@ final class InkCanvasView: UIView {
             for p in predicted { pts.append(InkPoint(location(p), w: last.width)) }
         }
         liveLayer.path = pen.style == .highlighter ? InkRenderer.centerline(pts)
-                                                   : InkRenderer.shape(pen.tapered(pts, end: false), style: pen.style)
+                                                   : InkRenderer.shape(pen.tapered(pts, end: false), style: pen.style, tip: pen.tip)
     }
 
     private func finishStroke(pen: InkPen) {
@@ -407,7 +431,8 @@ final class InkCanvasView: UIView {
         loopCandidate = nil
         if !pen.shapes, pen.style != .highlighter, Self.scribbleEnabled, scribbleErase(raw, pen: pen) { return }
         let color = InkColor(hex: pen.colorHex, opacity: pen.opacity)
-        var stroke = InkStroke(style: pen.style, color: color, points: pen.tapered(points))
+        var stroke = InkStroke(style: pen.style, color: color,
+                               points: pen.liftTapered(pen.tapered(points), speed: moveSpeed), tip: pen.tip)
         if pen.shapes, let clean = StrokeShaper.recognizeShape(points.map { $0.cg }) {
             stroke = InkStroke(style: pen.style, color: color, points: clean.map { InkPoint($0, w: pen.width) })
         }
@@ -419,7 +444,7 @@ final class InkCanvasView: UIView {
         let glow = CAShapeLayer()
         glow.actions = liveLayer.actions
         configure(glow, pen: pen)
-        glow.path = pen.style == .highlighter ? InkRenderer.centerline(stroke.points) : InkRenderer.shape(stroke.points, style: stroke.style)
+        glow.path = pen.style == .highlighter ? InkRenderer.centerline(stroke.points) : InkRenderer.shape(of: stroke)
         overlay.layer.insertSublayer(glow, below: liveLayer)
         liveLayer.path = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { glow.removeFromSuperlayer() }
@@ -564,7 +589,7 @@ final class InkCanvasView: UIView {
 
         // The ink circle fades as a dashed selection loop runs around it.
         let ink = CAShapeLayer()
-        ink.path = InkRenderer.shape(circle.points, style: circle.style)
+        ink.path = InkRenderer.shape(of: circle)
         ink.fillColor = circle.color.uiColor.cgColor
         ink.contentsScale = sharpness()
         overlay.layer.addSublayer(ink)
@@ -723,7 +748,7 @@ final class InkCanvasView: UIView {
                 runs[runs.count - 1].append(p)
             }
         }
-        return runs.filter { $0.count > 1 }.map { InkStroke(style: s.style, color: s.color, points: $0) }
+        return runs.filter { $0.count > 1 }.map { InkStroke(style: s.style, color: s.color, points: $0, tip: s.tip) }
     }
 
     private static func distance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {

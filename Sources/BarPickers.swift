@@ -23,6 +23,9 @@ struct PenTypePicker: View {
                     }
 
                     VStack(spacing: 16) {
+                        if tools.pen.kind == .fountain {
+                            TipShapePreview(feel: tools.pen.inkFeel, color: Color(hex: tools.pen.colorHex))
+                        }
                         feel("Tip Sharpness", \.tipSharpness)
                         feel("Pressure Sensitivity", \.pressure)
                         feel("Tip Flatness", \.tipFlatness)
@@ -247,5 +250,47 @@ struct ColorSlotPicker: View {
         .frame(width: 290)
         .presentationCompactAdaptation(.popover)
         .darkPanel()
+    }
+}
+
+/// The fountain pen's tip as it touches the paper at light, normal and hard pressure,
+/// so Tip Flatness and Pressure Sensitivity can be seen while dragging them.
+struct TipShapePreview: View {
+    let feel: InkFeel
+    let color: Color
+
+    var body: some View {
+        let pen = InkPen(style: .oval, colorHex: "#000000", width: 10, feel: feel)
+        let tip = pen.tip
+        let levels: [(String, CGFloat)] = [("Light", 0.08), ("Normal", 0.5), ("Hard", 1)]
+        let sizes = levels.map { level -> CGSize in
+            let w = pen.width(pressure: level.1, direction: 0)
+            return CGSize(width: w, height: tip?.height(forWidth: w) ?? w)
+        }
+        // One scale for all three, so their sizes compare.
+        let biggest = sizes.map { max($0.width, $0.height) }.max() ?? 1
+        HStack(spacing: 0) {
+            ForEach(levels.indices, id: \.self) { i in
+                VStack(spacing: 6) {
+                    Canvas { ctx, size in
+                        let s = min(size.width, size.height) * 0.9 / max(biggest, 0.01)
+                        let w = sizes[i].width * s, h = sizes[i].height * s
+                        var t = CGAffineTransform(translationX: size.width / 2, y: size.height / 2)
+                        t = t.rotated(by: InkRenderer.ovalAngle)
+                        let oval = Path(ellipseIn: CGRect(x: -w / 2, y: -h / 2, width: w, height: h)).applying(t)
+                        ctx.fill(oval, with: .color(color))
+                    }
+                    .frame(height: 44)
+                    Text(levels[i].0.uppercased())
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.5)
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.06)))
+        .animation(.snappy(duration: 0.15), value: feel)
     }
 }

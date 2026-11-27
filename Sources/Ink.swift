@@ -3,13 +3,13 @@ import PencilKit // only to read notebooks saved before Folio had its own pens
 
 // MARK: - Model
 
-/// Folio's own pens. Stored as one byte per stroke: 0–4 are the fixed pens, and 16–31 are the
-/// flat-nib fountain pen at 16 levels of flatness.
+/// Folio's own pens. Stored as one byte per stroke: 0–5 are the pens, and 16–31 are the
+/// 1.9–1.10 flat-nib fountain pen at 16 levels of flatness.
 struct InkStyle: Hashable {
     let rawValue: UInt8
 
     init?(rawValue: UInt8) {
-        guard rawValue <= 4 || (16...31).contains(rawValue) else { return nil }
+        guard rawValue <= 5 || (16...31).contains(rawValue) else { return nil }
         self.rawValue = rawValue
     }
     private init(_ v: UInt8) { rawValue = v }
@@ -21,6 +21,9 @@ struct InkStyle: Hashable {
     static let brush = InkStyle(3)
     /// Flat calligraphy nib written by 1.9 (flatness 0.85).
     static let nib = InkStyle(4)
+    /// The fountain pen since 1.11: an oval tip that spreads sideways as you press.
+    /// Each stroke keeps its tip's shape (`InkTip`).
+    static let oval = InkStyle(5)
 
     /// The flat-nib fountain pen at a flatness from 0 (square nib) to 1 (thinnest hairlines).
     static func nibStyle(flatness f: Double) -> InkStyle {
@@ -44,6 +47,26 @@ struct InkPoint: Equatable {
 
     var cg: CGPoint { CGPoint(x: CGFloat(x), y: CGFloat(y)) }
     var width: CGFloat { CGFloat(w) }
+}
+
+/// The oval fountain pen's tip for one stroke. Each point's width is the tip's width
+/// (it spreads sideways as you press); the tip's height follows from it: it grows only a
+/// little with pressure, and shrinks with the width where the line tapers to a point.
+struct InkTip: Equatable {
+    /// Tip width and height at the lightest pressure (page units).
+    var hMin: Float
+    var vMin: Float
+    /// How much the height grows for each unit the width grows with pressure.
+    var slope: Float
+
+    func height(forWidth w: CGFloat) -> CGFloat {
+        let hm = CGFloat(hMin), vm = CGFloat(vMin)
+        guard hm > 0.0001 else { return w }
+        if w <= hm { return vm * w / hm } // a tapering end shrinks the whole tip
+        return vm + CGFloat(slope) * (w - hm)
+    }
+
+    func scaled(_ s: Float) -> InkTip { InkTip(hMin: hMin * s, vMin: vMin * s, slope: slope) }
 }
 
 struct InkColor: Equatable {
@@ -78,15 +101,24 @@ struct InkStroke: Identifiable, Equatable {
     var style: InkStyle
     var color: InkColor
     var points: [InkPoint]
+    /// The oval fountain pen's tip (nil for every other pen).
+    var tip: InkTip?
     /// Everything the stroke covers, including its width.
     private(set) var bounds: CGRect
 
-    init(id: UUID = UUID(), style: InkStyle, color: InkColor, points: [InkPoint]) {
+    init(id: UUID = UUID(), style: InkStyle, color: InkColor, points: [InkPoint], tip: InkTip? = nil) {
         self.id = id
+        self.tip = tip
         self.style = style
         self.color = color
         self.points = points
         bounds = Self.measure(points)
+        // The oval tip can be taller than it is wide (light pressure): leave room for it.
+        if let tip, !bounds.isNull {
+            let maxW = CGFloat(points.map(\.w).max() ?? 0)
+            let extra = max(tip.height(forWidth: maxW) - maxW, 0) / 2
+            if extra > 0 { bounds = bounds.insetBy(dx: -extra, dy: -extra) }
+        }
     }
 
     static func measure(_ pts: [InkPoint]) -> CGRect {
@@ -114,11 +146,11 @@ struct InkStroke: Identifiable, Equatable {
             let q = p.cg.applying(t)
             return InkPoint(x: Float(q.x), y: Float(q.y), w: p.w * s)
         }
-        return InkStroke(style: style, color: color, points: pts)
+        return InkStroke(style: style, color: color, points: pts, tip: tip?.scaled(s))
     }
 
     func recolored(_ c: InkColor) -> InkStroke {
-        var copy = InkStroke(style: style, color: c, points: points)
+        var copy = InkStroke(style: style, color: c, points: points, tip: tip)
         if style == .highlighter { copy.color.a = color.a }
         return copy
     }
@@ -140,18 +172,28 @@ struct InkDrawing: Equatable {
         InkDrawing(strokes: strokes.map { $0.applying(t) })
     }
 
-    // MARK: Saving (a small binary format: "FNK1", then each stroke's style, colour and points)
+    // MARK: Saving (a small binary format: "FNK2", then each stroke's style, colour, tip and points;
+    // "FNK1", from before 1.11, has no tip)
 
-    private static let magic: [UInt8] = Array("FNK1".utf8)
+    private static let magic1: [UInt8] = Array("FNK1".utf8)
+    private static let magic2: [UInt8] = Array("FNK2".utf8)
 
     func dataRepresentation() -> Data {
         var d = Data()
-        d.reserveCapacity(8 + strokes.reduce(0) { $0 + 9 + $1.points.count * 12 })
-        d.append(contentsOf: Self.magic)
+        d.reserveCapacity(8 + strokes.reduce(0) { $0 + 22 + $1.points.count * 12 })
+        d.append(contentsOf: Self.magic2)
         d.appendLE(UInt32(strokes.count))
         for s in strokes {
             d.append(s.style.rawValue)
             d.append(contentsOf: [s.color.r, s.color.g, s.color.b, s.color.a])
+            if let t = s.tip {
+                d.append(1)
+                d.appendLE(t.hMin.bitPattern)
+                d.appendLE(t.vMin.bitPattern)
+                d.appendLE(t.slope.bitPattern)
+            } else {
+                d.append(0)
+            }
             d.appendLE(UInt32(s.points.count))
             for p in s.points {
                 d.appendLE(p.x.bitPattern)
@@ -164,11 +206,21 @@ struct InkDrawing: Equatable {
 
     init?(data: Data) {
         var r = ByteReader(data: data)
-        guard let m = r.bytes(4), m == Self.magic, let count = r.u32() else { return nil }
+        guard let m = r.bytes(4), m == Self.magic1 || m == Self.magic2, let count = r.u32() else { return nil }
+        let hasTips = m == Self.magic2
         var out: [InkStroke] = []
         out.reserveCapacity(Int(count))
         for _ in 0..<count {
-            guard let st = r.u8(), let c = r.bytes(4), let n = r.u32(), r.remaining >= Int(n) * 12 else { return nil }
+            guard let st = r.u8(), let c = r.bytes(4) else { return nil }
+            var tip: InkTip?
+            if hasTips {
+                guard let flag = r.u8() else { return nil }
+                if flag & 1 != 0 {
+                    guard let h = r.f32(), let v = r.f32(), let k = r.f32() else { return nil }
+                    tip = InkTip(hMin: h, vMin: v, slope: k)
+                }
+            }
+            guard let n = r.u32(), r.remaining >= Int(n) * 12 else { return nil }
             var pts: [InkPoint] = []
             pts.reserveCapacity(Int(n))
             for _ in 0..<n {
@@ -176,7 +228,7 @@ struct InkDrawing: Equatable {
                 pts.append(InkPoint(x: x, y: y, w: w))
             }
             out.append(InkStroke(style: InkStyle(rawValue: st) ?? .ballpoint,
-                                 color: InkColor(r: c[0], g: c[1], b: c[2], a: c[3]), points: pts))
+                                 color: InkColor(r: c[0], g: c[1], b: c[2], a: c[3]), points: pts, tip: tip))
         }
         strokes = out
     }
@@ -262,6 +314,12 @@ struct InkPen: Equatable {
     func width(pressure p: CGFloat, direction: CGFloat) -> CGFloat {
         if style == .highlighter || shapes { return width }
         let k = CGFloat(feel.pressure)
+        if style == .oval {
+            // Width here is the tip's width: it spreads as you press.
+            let r = ovalRange
+            let pe = sin(min(max(p, 0), 1) * .pi / 2)
+            return width * (r.hLo + (r.hHi - r.hLo) * pe)
+        }
         if style.isNib {
             // Width here is the nib's length; the stroke's thickness comes from its direction.
             let pe = sin(min(max(p, 0), 1) * .pi / 2)
@@ -282,9 +340,63 @@ struct InkPen: Equatable {
         return w
     }
 
+    /// The oval tip's width (h) and height (v) at the lightest and hardest pressure, as
+    /// multiples of the pen size. Tip Flatness sets how far the tip spreads sideways:
+    /// round (0) just gets a little bigger all round, the middle is a soft oval that turns
+    /// down-strokes bold, and flat (1) is a thin bar with very bold down-strokes and thin
+    /// cross-strokes. Pressure Sensitivity stretches or shrinks the light-to-hard range.
+    var ovalRange: (hLo: CGFloat, hHi: CGFloat, vLo: CGFloat, vHi: CGFloat) {
+        let round: [CGFloat] = [0.80, 1.20, 0.80, 1.20]
+        let middle: [CGFloat] = [0.72, 1.45, 0.92, 1.22]
+        let flat: [CGFloat] = [0.75, 1.75, 0.30, 0.40]
+        let s = CGFloat(min(max(feel.tipFlatness, 0), 1))
+        let (a, b, t) = s < 0.5 ? (round, middle, s / 0.5) : (middle, flat, (s - 0.5) / 0.5)
+        var v = zip(a, b).map { $0 + ($1 - $0) * t }
+        // Default sensitivity (0.5) gives the ranges above; 0 is no pressure, 1 twice the range.
+        let f = CGFloat(min(max(feel.pressure, 0), 1)) / 0.5
+        for (lo, hi) in [(0, 1), (2, 3)] {
+            let mid = (v[lo] + v[hi]) / 2
+            v[lo] = max(mid - (mid - v[lo]) * f, 0.15)
+            v[hi] = mid + (v[hi] - mid) * f
+        }
+        return (v[0], v[1], v[2], v[3])
+    }
+
+    /// The tip that goes with this pen's strokes (only the oval fountain pen has one).
+    var tip: InkTip? {
+        guard style == .oval, !shapes else { return nil }
+        let r = ovalRange
+        let dh = r.hHi - r.hLo
+        return InkTip(hMin: Float(width * r.hLo), vMin: Float(width * r.vLo),
+                      slope: dh > 0.001 ? Float((r.vHi - r.vLo) / dh) : 0)
+    }
+
     /// How far (page units) the pointed start and end reach.
     var taperLength: CGFloat {
-        style == .highlighter || shapes ? 0 : width * 7 * CGFloat(feel.tipSharpness)
+        style == .highlighter || shapes || style == .oval ? 0 : width * 7 * CGFloat(feel.tipSharpness)
+    }
+
+    /// The oval pen's ends: a quick lift leaves a pointed tail; stopping before lifting leaves
+    /// the round end. `speed` is how fast the Pencil was moving as it lifted (points a second).
+    func liftTapered(_ pts: [InkPoint], speed: CGFloat) -> [InkPoint] {
+        guard style == .oval, !shapes, pts.count > 2 else { return pts }
+        let quick = min(max((speed - 250) / 1100, 0), 1)
+        let L = width * 6 * CGFloat(feel.tipSharpness) * quick
+        guard L > 0.05 else { return pts }
+        var along = [CGFloat](repeating: 0, count: pts.count)
+        for i in 1..<pts.count {
+            along[i] = along[i - 1] + hypot(pts[i].cg.x - pts[i - 1].cg.x, pts[i].cg.y - pts[i - 1].cg.y)
+        }
+        let total = along[pts.count - 1]
+        let reach = min(L, total * 0.45)
+        guard reach > 0.05 else { return pts }
+        return pts.indices.map { i in
+            let f = min(max((total - along[i]) / reach, 0), 1)
+            var p = pts[i]
+            // Eased, so the tail narrows smoothly into a fine point.
+            p.w = Float(p.width * (0.08 + 0.92 * sin(f * .pi / 2)))
+            return p
+        }
     }
 
     /// Thins the first and last `taperLength` of a line to a point.
@@ -379,8 +491,53 @@ enum InkRenderer {
     }
 
     /// The filled shape of a stroke in its pen's style.
-    static func shape(_ pts: [InkPoint], style: InkStyle) -> CGPath {
-        style.isNib ? nibOutline(pts, thickness: style.nibThickness) : outline(pts)
+    static func shape(_ pts: [InkPoint], style: InkStyle, tip: InkTip? = nil) -> CGPath {
+        if style == .oval { return ovalOutline(pts, tip: tip) }
+        return style.isNib ? nibOutline(pts, thickness: style.nibThickness) : outline(pts)
+    }
+
+    static func shape(of s: InkStroke) -> CGPath { shape(s.points, style: s.style, tip: s.tip) }
+
+    /// The oval tip leans a little: its right side is slightly higher.
+    static let ovalAngle: CGFloat = -16 * .pi / 180
+    private static let ovalSides = 28
+    private static let ovalUnit: [CGPoint] = (0..<ovalSides).map { i in
+        let a = CGFloat(i) / CGFloat(ovalSides) * 2 * .pi
+        return CGPoint(x: cos(a), y: sin(a))
+    }
+
+    /// The oval tip dragged along the line: each step adds the area the tip sweeps (the
+    /// convex hull of the tip at both ends), so the edges are smooth at any zoom.
+    static func ovalOutline(_ pts: [InkPoint], tip: InkTip?) -> CGPath {
+        let path = CGMutablePath()
+        guard !pts.isEmpty else { return path }
+        let avg = CGFloat(pts.reduce(Float(0)) { $0 + $1.w }) / CGFloat(pts.count)
+        let dense = densify(pts, spacing: max(0.3, min(1.0, avg * 0.2)))
+        let ca = cos(ovalAngle), sa = sin(ovalAngle)
+        func oval(_ p: InkPoint) -> [CGPoint] {
+            let a = max(p.width / 2, 0.15)
+            let b = max((tip?.height(forWidth: p.width) ?? p.width) / 2, 0.12)
+            let c = p.cg
+            return ovalUnit.map { u in
+                let x = u.x * a, y = u.y * b
+                return CGPoint(x: c.x + x * ca - y * sa, y: c.y + x * sa + y * ca)
+            }
+        }
+        func add(_ q: [CGPoint]) {
+            guard q.count > 2 else { return }
+            var q = q
+            if signedArea(q) < 0 { q.reverse() }
+            path.addLines(between: q)
+            path.closeSubpath()
+        }
+        var prev = oval(dense[0])
+        add(prev)
+        for i in dense.indices.dropFirst() {
+            let cur = oval(dense[i])
+            add(convexHull(prev + cur))
+            prev = cur
+        }
+        return path
     }
 
     /// The flat nib's angle: its edge rises to the right, so it's thin travelling up-right
@@ -520,7 +677,7 @@ final class OutlineCache {
         lock.lock()
         if let p = paths[s.id] { lock.unlock(); return p }
         lock.unlock()
-        let p = InkRenderer.shape(s.points, style: s.style)
+        let p = InkRenderer.shape(of: s)
         lock.lock()
         if paths.count > 6000 { paths.removeAll(keepingCapacity: true) }
         paths[s.id] = p

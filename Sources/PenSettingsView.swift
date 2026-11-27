@@ -40,7 +40,8 @@ struct StrokePreview: View {
             let pressure = 0.2 + 0.75 * sin(t * .pi)
             points.append(InkPoint(p, w: pen.width(pressure: pressure, direction: dir)))
         }
-        let stroke = InkStroke(style: style, color: InkColor(color), points: pen.tapered(points))
+        let stroke = InkStroke(style: style, color: InkColor(color),
+                                points: pen.liftTapered(pen.tapered(points), speed: 900), tip: pen.tip)
         let format = UIGraphicsImageRendererFormat()
         format.scale = UIScreen.main.scale
         format.opaque = false

@@ -125,6 +125,6 @@ enum DemoMode {
             prev = p
             points.append(InkPoint(p, w: pen.width(pressure: 0.3 + 0.6 * sin(t * .pi), direction: dir)))
         }
-        return InkStroke(style: style, color: InkColor(hex: hex), points: points)
+        return InkStroke(style: style, color: InkColor(hex: hex), points: points, tip: pen.tip)
     }
 }
