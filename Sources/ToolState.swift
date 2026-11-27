@@ -1,5 +1,4 @@
 import SwiftUI
-import PencilKit
 
 enum EditorTool: String, Codable {
     case pen, highlighter, eraser, lasso
@@ -12,7 +11,7 @@ enum EditorTool: String, Codable {
     /// Drag to cover writing with tape; tap tape to peek under it.
     case tape
 
-    /// Tools that put PencilKit ink on the page.
+    /// Tools that put ink on the page.
     var inks: Bool { self == .pen || self == .highlighter || self == .shapes }
     /// Tools that have a colour/size bar.
     var hasContextBar: Bool { self == .pen || self == .highlighter || self == .eraser || self == .shapes || self == .text || self == .tape }
@@ -197,16 +196,8 @@ enum InkKind: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    var inkType: PKInkingTool.InkType {
-        switch self {
-        case .ballpoint: return .pen
-        case .fountain: return .fountainPen
-        case .pencil: return .pencil
-        case .monoline: return .monoline
-        case .brush: return .watercolor
-        case .crayon: return .crayon
-        }
-    }
+    /// The Folio pen that draws this kind (only ballpoint and fountain are offered now).
+    var inkStyle: InkStyle { self == .fountain ? .fountain : .ballpoint }
 
     var widthRange: ClosedRange<CGFloat> {
         switch self {
@@ -397,22 +388,23 @@ final class ToolState: ObservableObject {
         }
     }
 
-    var pkTool: PKTool {
+    var inkTool: InkTool {
         switch tool {
         case .pen:
-            return PKInkingTool(pen.kind.inkType, color: pen.uiColor, width: pen.width)
+            return .pen(InkPen(style: pen.kind.inkStyle, colorHex: pen.colorHex, width: pen.width, opacity: pen.opacity,
+                               feel: pen.inkFeel))
         case .highlighter:
-            return PKInkingTool(.marker, color: highlighter.uiColor, width: highlighter.width)
+            return .pen(InkPen(style: .highlighter, colorHex: highlighter.colorHex, width: highlighter.width,
+                               opacity: highlighter.opacity))
         case .eraser:
-            return eraserMode == .stroke ? PKEraserTool(.vector) : PKEraserTool(.bitmap, width: eraserWidth)
+            return .eraser(precise: eraserMode != .stroke, width: eraserWidth)
         case .lasso:
-            return PKLassoTool()
+            return .lasso
         case .shapes:
-            return PKInkingTool(pen.kind == .brush || pen.kind == .crayon ? .pen : pen.kind.inkType,
-                                color: pen.uiColor, width: pen.width)
+            return .pen(InkPen(style: .ballpoint, colorHex: pen.colorHex, width: pen.width, opacity: pen.opacity, shapes: true))
         case .text, .laser, .tape:
-            // These don't draw ink; the canvas is switched off while they're active.
-            return PKInkingTool(.pen, color: pen.uiColor, width: pen.width)
+            // These don't draw ink; the ink layer is switched off while they're active.
+            return .none
         }
     }
 

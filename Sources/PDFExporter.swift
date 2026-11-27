@@ -1,5 +1,4 @@
 import UIKit
-import PencilKit
 
 enum PDFExporter {
     private static func fileURL(_ title: String, fallback: String, ext: String) -> URL {
@@ -36,7 +35,7 @@ enum PDFExporter {
     }
 
     /// Infinite canvas: one page that fits everything that was written.
-    static func exportCanvas(title: String, paper: PaperColor, drawing: PKDrawing, elements: [PageElement],
+    static func exportCanvas(title: String, paper: PaperColor, drawing: InkDrawing, elements: [PageElement],
                              rect: CGRect, imageLoader: (String) -> UIImage?) -> URL? {
         let url = fileURL(title, fallback: "Canvas", ext: "pdf")
         let bounds = CGRect(origin: .zero, size: rect.size)
@@ -51,13 +50,10 @@ enum PDFExporter {
                 cg.translateBy(x: -rect.minX, y: -rect.minY)
                 ElementRenderer.draw(elements, overInk: false, in: cg, imageLoader: imageLoader)
                 cg.restoreGState()
-                var image = UIImage()
-                UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-                    image = drawing.image(from: rect, scale: min(3, 6000 / max(rect.width, rect.height, 1)))
-                }
-                image.draw(in: bounds)
                 cg.saveGState()
                 cg.translateBy(x: -rect.minX, y: -rect.minY)
+                // Ink goes in as vectors, so it stays sharp however far the PDF is zoomed.
+                InkRenderer.draw(drawing, in: cg)
                 ElementRenderer.draw(elements, overInk: true, in: cg, imageLoader: imageLoader)
                 cg.restoreGState()
             }

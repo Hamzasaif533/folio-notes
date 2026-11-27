@@ -1,5 +1,4 @@
 import SwiftUI
-import PencilKit
 import PhotosUI
 import UniformTypeIdentifiers
 
@@ -46,7 +45,7 @@ private struct ZoomPercentText: View {
 struct SurfaceHost: UIViewControllerRepresentable {
     let store: LibraryStore
     let notebook: Notebook
-    let tool: PKTool
+    let tool: InkTool
     let editorTool: EditorTool
     let feel: InkFeel
     let readOnly: Bool
@@ -262,7 +261,7 @@ struct EditorView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                SurfaceHost(store: store, notebook: notebook, tool: tools.pkTool, editorTool: tools.tool,
+                SurfaceHost(store: store, notebook: notebook, tool: tools.inkTool, editorTool: tools.tool,
                             feel: tools.pen.inkFeel, readOnly: readOnly, horizontal: horizontal,
                             textColor: tools.textColorHex, textSize: tools.textSize,
                             tapeColor: tools.tapeColorHex, tapeWidth: tools.tapeWidth,

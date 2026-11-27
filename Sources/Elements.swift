@@ -1,5 +1,4 @@
 import UIKit
-import PencilKit
 
 /// The objects on one page, shared by the layer under the ink and the layer
 /// over it (tape), so both save into one list.
@@ -571,7 +570,7 @@ enum ElementRenderer {
 
 /// Everything on a page, for thumbnails, sharing and PDF export.
 struct PageContent {
-    var drawing: PKDrawing
+    var drawing: InkDrawing
     var elements: [PageElement]
     var background: UIImage?
     var extent: PageExtent = .zero
@@ -594,11 +593,10 @@ enum PageRenderer {
             TemplateRenderer.draw(template: template, paper: paper, in: ctx, size: rect.size)
         }
         ElementRenderer.draw(page.elements, overInk: false, in: ctx, imageLoader: imageLoader)
-        var ink = UIImage()
-        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-            ink = page.drawing.image(from: rect, scale: inkScale)
-        }
-        ink.draw(in: rect)
+        ctx.saveGState()
+        ctx.clip(to: rect)
+        InkRenderer.draw(page.drawing, in: ctx)
+        ctx.restoreGState()
         ElementRenderer.draw(page.elements, overInk: true, in: ctx, imageLoader: imageLoader)
     }
 

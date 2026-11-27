@@ -1,5 +1,4 @@
 import Foundation
-import PencilKit
 import UIKit
 
 /// Only active when the app is launched with -FolioDemo (used by the automated
@@ -99,35 +98,33 @@ enum DemoMode {
     }
 
     /// A few strokes in different pens and colours, to check ink visibility.
-    static func sampleDrawing() -> PKDrawing {
-        let rows: [(PKInkingTool.InkType, String, CGFloat)] = [
-            (.pen, "#000000", 3), (.fountainPen, "#1F3BB3", 4), (.pen, "#D32F2F", 3),
-            (.pencil, "#3C3C43", 4), (.monoline, "#2E6B1F", 3), (.marker, "#F7E14A", 22)
+    static func sampleDrawing() -> InkDrawing {
+        let rows: [(InkStyle, String, CGFloat)] = [
+            (.ballpoint, "#000000", 3), (.fountain, "#1F3BB3", 4), (.ballpoint, "#D32F2F", 3),
+            (.ballpoint, "#3C3C43", 4), (.fountain, "#2E6B1F", 3), (.highlighter, "#F7E14A", 22)
         ]
-        var strokes: [PKStroke] = []
+        var strokes: [InkStroke] = []
         for (i, row) in rows.enumerated() {
             let y = 230 + CGFloat(i) * 90
-            strokes.append(wave(ink: PKInk(row.0, color: UIColor(hex: row.1)), width: row.2,
+            strokes.append(wave(style: row.0, hex: row.1, width: row.2,
                                 from: CGPoint(x: 80, y: y), length: 560, amplitude: 18))
         }
-        return PKDrawing(strokes: strokes)
+        return InkDrawing(strokes: strokes)
     }
 
-    static func wave(ink: PKInk, width: CGFloat, from start: CGPoint, length: CGFloat, amplitude: CGFloat) -> PKStroke {
-        var points: [PKStrokePoint] = []
+    static func wave(style: InkStyle, hex: String, width: CGFloat, from start: CGPoint,
+                     length: CGFloat, amplitude: CGFloat) -> InkStroke {
+        let pen = InkPen(style: style, colorHex: hex, width: width)
+        var points: [InkPoint] = []
+        var prev: CGPoint?
         let n = 90
         for i in 0...n {
             let t = CGFloat(i) / CGFloat(n)
-            points.append(PKStrokePoint(location: CGPoint(x: start.x + t * length,
-                                                          y: start.y + sin(t * .pi * 4) * amplitude),
-                                        timeOffset: TimeInterval(t),
-                                        size: CGSize(width: width, height: width),
-                                        opacity: 1,
-                                        force: 0.4 + sin(t * .pi),
-                                        azimuth: 0,
-                                        altitude: .pi / 2))
+            let p = CGPoint(x: start.x + t * length, y: start.y + sin(t * .pi * 4) * amplitude)
+            let dir = prev.map { atan2(p.y - $0.y, p.x - $0.x) } ?? 0
+            prev = p
+            points.append(InkPoint(p, w: pen.width(pressure: 0.3 + 0.6 * sin(t * .pi), direction: dir)))
         }
-        return PKStroke(ink: ink, path: PKStrokePath(controlPoints: points, creationDate: Date()),
-                        transform: .identity, mask: nil)
+        return InkStroke(style: style, color: InkColor(hex: hex), points: points)
     }
 }

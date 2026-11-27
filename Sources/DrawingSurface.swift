@@ -1,6 +1,5 @@
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
-import PencilKit
 
 /// Shared behaviour for the paged notebook and the infinite canvas:
 /// Apple Pencil Pro double-tap and squeeze, palm rejection, undo, tool state,
@@ -12,11 +11,11 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     let undo = UndoManager()
     override var undoManager: UndoManager? { undo }
 
-    var tool: PKTool = PKInkingTool(.pen, color: .black, width: 3)
+    var tool: InkTool = .none
     var inputMode: DrawingInput = .pencilOnly
     var rulerOn = false
 
-    /// The editor tool behind `tool` (PencilKit doesn't know about shapes, text, laser or tape).
+    /// The editor tool behind `tool` (the ink layer only knows pens, erasers and the lasso).
     private(set) var editorTool: EditorTool = .pen
     private(set) var feel: InkFeel = .standard
     private(set) var readOnly = false
@@ -53,9 +52,6 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     private lazy var textTap = UITapGestureRecognizer(target: self, action: #selector(textTapped(_:)))
     private var tapePoints: [CGPoint] = []
     private var tapeLayer: ElementsLayer?
-
-    private var strokeCounts: [ObjectIdentifier: Int] = [:]
-    private var reshaping = false
 
     init(store: LibraryStore, notebook: Notebook) {
         self.store = store
@@ -115,6 +111,8 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         tapePreview.lineCap = .butt
         tapePreview.lineJoin = .round
         laser.layer.addSublayer(tapePreview)
+        installRuler()
+        installSelectionMenu()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -127,9 +125,8 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     /// The scroll view whose finger scrolling should be blocked while writing.
     var scrollingView: UIScrollView? { nil }
     func applyTool() {}
-    func applyRuler() {}
     func applyDrawingPolicy(fingerDraws: Bool) {}
-    /// Turn the PencilKit canvases on or off for the current tool / read-only state.
+    /// Turn the ink layers on or off for the current tool / read-only state.
     func applyCanvasEnabled(_ enabled: Bool) {}
     func saveAll() {}
     func resetZoom() {}
@@ -139,11 +136,9 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
 
     // MARK: Tools
 
-    func setTool(_ newTool: PKTool) {
+    func setTool(_ newTool: InkTool) {
         // SwiftUI calls this on every redraw; handing the same tool to every page again is wasted work.
-        if let a = newTool as? PKInkingTool, let b = tool as? PKInkingTool, a == b { return }
-        if let a = newTool as? PKEraserTool, let b = tool as? PKEraserTool, a == b { return }
-        if newTool is PKLassoTool && tool is PKLassoTool { return }
+        guard newTool != tool else { return }
         tool = newTool
         applyTool()
     }
@@ -240,6 +235,7 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if g === rulerPan || g === rulerTurn { return touchIsOnRuler(touch) }
         guard g === textTap || g === tapePress else { return true }
         // Taps on an object belong to the object (select, type, peek under tape).
         var v = touch.view
@@ -299,42 +295,160 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         sv.pinchGestureRecognizer?.isEnabled = !touchingObject && !zoomLocked && !(toolInUse && !fingerDraws)
     }
 
-    // MARK: Pen feel & shapes
+    // MARK: Ink: undo, saving, the lasso menu and the ruler
 
-    /// Subclasses call this from every drawing change. A brand-new pen stroke is
-    /// reshaped (GoodNotes-style feel, or snapped to a shape with the Shapes tool).
-    func strokeAdded(in canvas: PKCanvasView) {
-        let key = ObjectIdentifier(canvas)
-        let count = canvas.drawing.strokes.count
-        let before = strokeCounts[key] ?? count
-        strokeCounts[key] = count
-        guard !reshaping, count == before + 1 else { return }
-        guard editorTool == .shapes || (editorTool == .pen && !feel.isStandard) else { return }
-        var drawing = canvas.drawing
-        guard let last = drawing.strokes.last else { return }
-        let replacement = editorTool == .shapes
-            ? StrokeShaper.recognizeShape(last)
-            : StrokeShaper.apply(feel, to: last)
-        guard let new = replacement else { return }
-        let original = drawing
-        drawing.strokes[drawing.strokes.count - 1] = new
-        replaceDrawing(canvas, with: drawing, undoTo: original)
+    /// Subclasses connect every ink view they make through this.
+    func wireInk(_ ink: InkCanvasView) {
+        ink.onBegan = { [weak self] in self?.toolUseBegan() }
+        ink.onEnded = { [weak self] in self?.toolUseEnded() }
+        ink.onCommit = { [weak self] canvas, before, after in
+            guard let self else { return }
+            let target = self.inkChanged(canvas, to: after)
+            self.registerInkUndo(target, before: before, after: after)
+        }
+        ink.onObjectTouch = { [weak self] active in self?.objectTouch(active) }
+        ink.onSelectionChanged = { [weak self] canvas in self?.selectionChanged(canvas) }
+        ink.rulerSnap = { [weak self] canvas, p in self?.rulerProjection(canvas, start: p) }
+        ink.tool = tool
+        ink.fingerDraws = fingerDraws
     }
 
-    /// Swaps the drawing and registers an undo step that swaps it back. It lands in
-    /// the same undo group as PencilKit's own step, so one Undo removes the stroke.
-    private func replaceDrawing(_ canvas: PKCanvasView, with d: PKDrawing, undoTo old: PKDrawing) {
-        reshaping = true
-        canvas.drawing = d
-        reshaping = false
-        strokeCounts[ObjectIdentifier(canvas)] = d.strokes.count
+    /// The ink on `canvas` changed to `drawing`. Subclasses save it (and keep a zoom box and its
+    /// page in step), and return the view that owns the ink, for undo.
+    func inkChanged(_ canvas: InkCanvasView, to drawing: InkDrawing) -> InkCanvasView { canvas }
+
+    private func registerInkUndo(_ canvas: InkCanvasView, before: InkDrawing, after: InkDrawing) {
         undo.registerUndo(withTarget: self) { target in
-            target.replaceDrawing(canvas, with: old, undoTo: d)
+            target.restoreInk(canvas, to: before, redo: after)
         }
     }
 
-    func resetStrokeCount(_ canvas: PKCanvasView) {
-        strokeCounts[ObjectIdentifier(canvas)] = canvas.drawing.strokes.count
+    private func restoreInk(_ canvas: InkCanvasView, to d: InkDrawing, redo r: InkDrawing) {
+        canvas.clearSelection()
+        canvas.setDrawing(d)
+        _ = inkChanged(canvas, to: d)
+        undo.registerUndo(withTarget: self) { target in
+            target.restoreInk(canvas, to: r, redo: d)
+        }
+    }
+
+    // Lasso menu: colour, duplicate, delete.
+
+    private let selectionMenu = SelectionMenuView()
+    private weak var selectionCanvas: InkCanvasView?
+
+    private func selectionChanged(_ canvas: InkCanvasView) {
+        if canvas.hasSelection {
+            if let other = selectionCanvas, other !== canvas { other.clearSelection() }
+            selectionCanvas = canvas
+        } else if selectionCanvas === canvas {
+            selectionCanvas = nil
+        }
+        positionSelectionMenu()
+    }
+
+    /// Keeps the lasso menu just above the selection (call after scrolling or zooming).
+    func positionSelectionMenu() {
+        guard let c = selectionCanvas, let f = c.selectionFrame, c.window != nil else {
+            selectionMenu.isHidden = true
+            return
+        }
+        let r = c.convert(f, to: view)
+        let size = selectionMenu.intrinsicContentSize
+        var y = r.minY - size.height - 52
+        if y < 64 { y = r.maxY + 16 }
+        y = min(max(y, 64), view.bounds.height - size.height - 20)
+        let x = min(max(r.midX - size.width / 2, 12), view.bounds.width - size.width - 12)
+        selectionMenu.frame = CGRect(origin: CGPoint(x: x, y: y), size: size)
+        selectionMenu.isHidden = false
+        view.bringSubviewToFront(selectionMenu)
+    }
+
+    private func installSelectionMenu() {
+        selectionMenu.isHidden = true
+        selectionMenu.onColor = { [weak self] hex in self?.selectionCanvas?.recolorSelection(hex) }
+        selectionMenu.onDuplicate = { [weak self] in self?.selectionCanvas?.duplicateSelection() }
+        selectionMenu.onDelete = { [weak self] in self?.selectionCanvas?.deleteSelection() }
+        view.addSubview(selectionMenu)
+    }
+
+    // Ruler: drag it with one finger, turn it with two; lines started at its edge run along it.
+
+    private let ruler = RulerView()
+    private lazy var rulerPan = UIPanGestureRecognizer(target: self, action: #selector(rulerPanned(_:)))
+    private lazy var rulerTurn = UIRotationGestureRecognizer(target: self, action: #selector(rulerTurned(_:)))
+    private var rulerPlaced = false
+
+    private func installRuler() {
+        ruler.isHidden = true
+        ruler.isUserInteractionEnabled = false
+        view.insertSubview(ruler, belowSubview: laser)
+        for g in [rulerPan, rulerTurn] as [UIGestureRecognizer] {
+            g.delegate = self
+            g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            view.addGestureRecognizer(g)
+        }
+    }
+
+    func applyRuler() {
+        if rulerOn && !rulerPlaced {
+            rulerPlaced = true
+            ruler.center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        }
+        UIView.animate(withDuration: 0.2) { self.ruler.alpha = self.rulerOn ? 1 : 0 } completion: { _ in
+            self.ruler.isHidden = !self.rulerOn
+        }
+        if rulerOn { ruler.isHidden = false }
+    }
+
+    private func touchIsOnRuler(_ touch: UITouch) -> Bool {
+        guard rulerOn, !ruler.isHidden else { return false }
+        return ruler.bounds.insetBy(dx: -6, dy: -6).contains(touch.location(in: ruler))
+    }
+
+    @objc private func rulerPanned(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .began: objectTouch(true)
+        case .changed:
+            let t = g.translation(in: view)
+            ruler.center = CGPoint(x: ruler.center.x + t.x, y: ruler.center.y + t.y)
+            g.setTranslation(.zero, in: view)
+        default: objectTouch(false)
+        }
+    }
+
+    @objc private func rulerTurned(_ g: UIRotationGestureRecognizer) {
+        switch g.state {
+        case .began: objectTouch(true)
+        case .changed:
+            ruler.angle += g.rotation
+            g.rotation = 0
+        default:
+            // Settle on 0°, 45° or 90° when close.
+            let step = CGFloat.pi / 4
+            let nearest = (ruler.angle / step).rounded() * step
+            if abs(ruler.angle - nearest) < 3 * .pi / 180 {
+                UIView.animate(withDuration: 0.15) { self.ruler.angle = nearest }
+            }
+            objectTouch(false)
+        }
+    }
+
+    /// A stroke starting within reach of the ruler's edge follows the edge exactly.
+    private func rulerProjection(_ canvas: InkCanvasView, start: CGPoint) -> ((CGPoint) -> CGPoint)? {
+        guard rulerOn, !ruler.isHidden else { return nil }
+        let local = canvas.convert(start, to: ruler)
+        let h = ruler.bounds.height
+        let edge: CGFloat
+        if abs(local.y) < 40 { edge = -2 } else if abs(local.y - h) < 40 { edge = h + 2 } else { return nil }
+        guard local.x > -40, local.x < ruler.bounds.width + 40 else { return nil }
+        let r = ruler
+        return { [weak canvas] p in
+            guard let canvas else { return p }
+            var q = canvas.convert(p, to: r)
+            q.y = edge
+            return r.convert(q, to: canvas)
+        }
     }
 
     // MARK: Laser pointer

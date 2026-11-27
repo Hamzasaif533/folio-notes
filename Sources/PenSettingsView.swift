@@ -1,9 +1,8 @@
 import SwiftUI
-import PencilKit
 
-/// Live preview of a pen: draws a real PencilKit stroke with varying pressure.
+/// Live preview of a pen: a wavy line drawn by Folio's own pens, pressing harder in the middle.
 struct StrokePreview: View {
-    let inkType: PKInkingTool.InkType
+    let style: InkStyle
     let color: UIColor
     let width: CGFloat
     var feel: InkFeel = .standard
@@ -11,42 +10,43 @@ struct StrokePreview: View {
     var body: some View {
         GeometryReader { geo in
             if geo.size.width > 40, geo.size.height > 10 {
-                Image(uiImage: Self.render(inkType: inkType, color: color, width: width, size: geo.size, feel: feel))
+                Image(uiImage: Self.render(style: style, color: color, width: width, size: geo.size, feel: feel))
             }
         }
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.black.opacity(0.08), lineWidth: 1))
     }
 
-    static func render(inkType: PKInkingTool.InkType, color: UIColor, width: CGFloat, size: CGSize,
+    static func render(style: InkStyle, color: UIColor, width: CGFloat, size: CGSize,
                        feel: InkFeel = .standard) -> UIImage {
-        let ink = PKInk(inkType, color: color)
-        var points: [PKStrokePoint] = []
-        let n = 80
+        let pen = InkPen(style: style, colorHex: "#000000", width: width, feel: feel)
+        var points: [InkPoint] = []
+        var prev: CGPoint?
+        var steady: CGPoint?
+        let n = 120
         for i in 0...n {
             let t = CGFloat(i) / CGFloat(n)
             let x = 20 + t * (size.width - 40)
-            // A slightly shaky line, so stabilization has something to smooth.
+            // A slightly shaky line, so steadiness has something to smooth.
             let wobble = sin(t * 90) * 1.2
-            let y = size.height / 2 + sin(t * .pi * 2) * size.height * 0.22 + wobble
-            let force = 0.3 + 1.2 * sin(t * .pi)
-            let w = width * (0.55 + 0.75 * force / 1.5)
-            points.append(PKStrokePoint(location: CGPoint(x: x, y: y),
-                                        timeOffset: TimeInterval(t),
-                                        size: CGSize(width: w, height: w),
-                                        opacity: 1,
-                                        force: force,
-                                        azimuth: 0,
-                                        altitude: .pi / 2))
+            var p = CGPoint(x: x, y: size.height / 2 + sin(t * .pi * 2) * size.height * 0.22 + wobble)
+            if feel.stabilization > 0.01, let s = steady {
+                let a = 1 - 0.85 * CGFloat(feel.stabilization)
+                p = CGPoint(x: s.x + (p.x - s.x) * a, y: s.y + (p.y - s.y) * a)
+            }
+            steady = p
+            let dir = prev.map { atan2(p.y - $0.y, p.x - $0.x) } ?? 0
+            prev = p
+            let pressure = 0.2 + 0.75 * sin(t * .pi)
+            points.append(InkPoint(p, w: pen.width(pressure: pressure, direction: dir)))
         }
-        let path = PKStrokePath(controlPoints: points, creationDate: Date())
-        let stroke = StrokeShaper.apply(feel, to: PKStroke(ink: ink, path: path, transform: .identity, mask: nil))
-        let drawing = PKDrawing(strokes: [stroke])
-        var image = UIImage()
-        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-            image = drawing.image(from: CGRect(origin: .zero, size: size), scale: UIScreen.main.scale)
+        let stroke = InkStroke(style: style, color: InkColor(color), points: pen.tapered(points))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = UIScreen.main.scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: format).image { r in
+            InkRenderer.draw([stroke], in: r.cgContext)
         }
-        return image
     }
 }
 
@@ -357,7 +357,7 @@ struct PenSettingsView: View {
                     .font(.system(size: 22, weight: .regular, design: .serif))
                     .frame(maxWidth: .infinity)
                     .contentTransition(.opacity)
-                StrokePreview(inkType: tools.pen.kind.inkType, color: tools.pen.uiColor, width: tools.pen.width,
+                StrokePreview(style: tools.pen.kind.inkStyle, color: tools.pen.uiColor, width: tools.pen.width,
                               feel: tools.pen.inkFeel)
                     .frame(height: 76)
 
@@ -421,7 +421,7 @@ struct PenSettingsView: View {
                     VStack(spacing: 6) {
                         ForEach(tools.favorites) { fav in
                             HStack(spacing: 10) {
-                                StrokePreview(inkType: fav.kind.inkType, color: fav.uiColor, width: fav.width)
+                                StrokePreview(style: fav.kind.inkStyle, color: fav.uiColor, width: fav.width)
                                     .frame(height: 34)
                                     .onTapGesture { tools.selectFavorite(fav) }
                                 Button(role: .destructive) { withAnimation(.spring) { tools.removeFavorite(fav.id) } } label: {
@@ -516,7 +516,7 @@ struct HighlighterSettingsView: View {
             Text("Highlighter")
                 .font(.system(size: 22, weight: .regular, design: .serif))
                 .frame(maxWidth: .infinity)
-            StrokePreview(inkType: .marker, color: tools.highlighter.uiColor, width: tools.highlighter.width)
+            StrokePreview(style: .highlighter, color: tools.highlighter.uiColor, width: tools.highlighter.width)
                 .frame(height: 64)
             HStack {
                 Text("Thickness").font(.subheadline.weight(.semibold))

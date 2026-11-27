@@ -1,5 +1,4 @@
 import SwiftUI
-import PencilKit
 
 /// Tapping the pen that's already in use: just pick the pen type.
 struct PenTypePicker: View {

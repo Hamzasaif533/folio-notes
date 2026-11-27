@@ -1,27 +1,4 @@
 import UIKit
-import PencilKit
-
-/// Forwards only the PencilKit events we need. Kept separate from the view
-/// controllers so PencilKit keeps full control of its own scrolling and zooming.
-final class CanvasEvents: NSObject, PKCanvasViewDelegate {
-    let changed: (PKCanvasView) -> Void
-    let began: () -> Void
-    let ended: () -> Void
-    var scrolled: ((UIScrollView) -> Void)?
-    var zoomed: ((UIScrollView) -> Void)?
-
-    init(changed: @escaping (PKCanvasView) -> Void, began: @escaping () -> Void, ended: @escaping () -> Void) {
-        self.changed = changed
-        self.began = began
-        self.ended = ended
-    }
-
-    func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) { changed(canvasView) }
-    func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) { began() }
-    func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) { ended() }
-    func scrollViewDidScroll(_ scrollView: UIScrollView) { scrolled?(scrollView) }
-    func scrollViewDidZoom(_ scrollView: UIScrollView) { zoomed?(scrollView) }
-}
 
 /// Background for the infinite canvas: only the lines/dots that are on screen
 /// are drawn, as vectors, so they stay sharp at every zoom level.
@@ -110,13 +87,14 @@ final class InfiniteBackgroundView: UIView {
     }
 }
 
-/// An endless whiteboard (like GoodNotes' whiteboard): one PencilKit canvas
-/// that scrolls and zooms in every direction. PencilKit only renders what is
-/// on screen, so the canvas can be huge without using much memory.
-final class CanvasViewController: DrawingSurfaceController {
-    private let canvas = PKCanvasView()
-    private let background = InfiniteBackgroundView()
+/// An endless whiteboard (like GoodNotes' whiteboard): one sheet of Folio ink that scrolls
+/// and zooms in every direction. The ink is drawn in tiles, only where you look, so the
+/// board can be huge without using much memory.
+final class CanvasViewController: DrawingSurfaceController, UIScrollViewDelegate {
+    private let scroller = UIScrollView()
     private var extent = CGSize(width: 20000, height: 20000)
+    private lazy var ink = InkCanvasView(size: extent)
+    private let background = InfiniteBackgroundView()
     private var didPlace = false
     private var saveTask: Task<Void, Never>?
     private var isDirty = false
@@ -125,16 +103,7 @@ final class CanvasViewController: DrawingSurfaceController {
     private lazy var underLayer = ElementsLayer(model: model, overInk: false)
     private lazy var overLayer = ElementsLayer(model: model, overInk: true)
 
-    private lazy var events: CanvasEvents = {
-        let e = CanvasEvents(changed: { [weak self] c in self?.drawingChanged(c) },
-                             began: { [weak self] in self?.toolUseBegan() },
-                             ended: { [weak self] in self?.toolUseEnded() })
-        e.scrolled = { [weak self] _ in self?.viewportChanged() }
-        e.zoomed = { [weak self] _ in self?.viewportChanged() }
-        return e
-    }()
-
-    override var scrollingView: UIScrollView? { canvas }
+    override var scrollingView: UIScrollView? { scroller }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -145,28 +114,28 @@ final class CanvasViewController: DrawingSurfaceController {
         background.paper = notebook.paper
         view.addSubview(background)
 
-        canvas.frame = view.bounds
-        canvas.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        canvas.backgroundColor = .clear
-        canvas.isOpaque = false
-        canvas.contentInsetAdjustmentBehavior = .never
-        canvas.showsVerticalScrollIndicator = false
-        canvas.showsHorizontalScrollIndicator = false
-        canvas.bouncesZoom = true
-        canvas.minimumZoomScale = 0.2
-        canvas.maximumZoomScale = 6
-        canvas.overrideUserInterfaceStyle = .light
-        canvas.delegate = events
+        scroller.frame = view.bounds
+        scroller.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        scroller.backgroundColor = .clear
+        scroller.contentInsetAdjustmentBehavior = .never
+        scroller.showsVerticalScrollIndicator = false
+        scroller.showsHorizontalScrollIndicator = false
+        scroller.delaysContentTouches = false
+        scroller.bouncesZoom = true
+        scroller.minimumZoomScale = 0.2
+        scroller.maximumZoomScale = 6
+        scroller.delegate = self
         let drawing = store.loadDrawing(notebookId: notebook.id, pageId: pageId)
         let b = drawing.bounds
         if !b.isNull && !b.isEmpty {
             extent = CGSize(width: max(extent.width, b.maxX + 6000), height: max(extent.height, b.maxY + 6000))
         }
-        canvas.drawing = drawing
-        canvas.tool = tool
-        canvas.isRulerActive = rulerOn
-        view.addSubview(canvas)
-        resetStrokeCount(canvas)
+        ink.setSize(extent)
+        ink.setDrawing(drawing)
+        wireInk(ink)
+        scroller.addSubview(ink)
+        scroller.contentSize = extent
+        view.addSubview(scroller)
 
         // Objects float above the board (photos, text, stickies, tape).
         let nbId = notebook.id
@@ -194,24 +163,41 @@ final class CanvasViewController: DrawingSurfaceController {
         super.viewDidLayoutSubviews()
         guard !didPlace, view.bounds.width > 0 else { return }
         didPlace = true
-        canvas.zoomScale = 1
-        canvas.contentSize = CGSize(width: extent.width * canvas.zoomScale, height: extent.height * canvas.zoomScale)
+        scroller.zoomScale = 1
+        placeInk()
         // Start where the writing is, or in the middle of the board.
-        let b = canvas.drawing.bounds
+        let b = ink.drawing.bounds
         let focus: CGPoint
         if !b.isNull && !b.isEmpty {
             focus = CGPoint(x: b.midX, y: b.minY + min(b.height, view.bounds.height) / 2 - 60)
         } else {
             focus = CGPoint(x: extent.width / 2, y: extent.height / 2)
         }
-        canvas.contentOffset = CGPoint(x: focus.x - view.bounds.width / 2, y: focus.y - view.bounds.height / 2)
+        scroller.contentOffset = CGPoint(x: focus.x - view.bounds.width / 2, y: focus.y - view.bounds.height / 2)
         viewportChanged()
         onPageChanged?(0, 1)
     }
 
+    /// Keeps the ink's top-left corner at the scroll view's origin at the current zoom.
+    private func placeInk() {
+        let z = scroller.zoomScale
+        ink.setSize(extent)
+        ink.transform = CGAffineTransform(scaleX: z, y: z)
+        ink.center = CGPoint(x: extent.width * z / 2, y: extent.height * z / 2)
+        scroller.contentSize = CGSize(width: extent.width * z, height: extent.height * z)
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { ink }
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { viewportChanged() }
+    func scrollViewDidZoom(_ scrollView: UIScrollView) { viewportChanged() }
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        ink.zoomChanged()
+        positionSelectionMenu()
+    }
+
     private func viewportChanged() {
-        let z = canvas.zoomScale
-        let o = canvas.contentOffset
+        let z = scroller.zoomScale
+        let o = scroller.contentOffset
         background.update(visible: CGRect(x: o.x / z, y: o.y / z,
                                           width: view.bounds.width / z, height: view.bounds.height / z),
                           zoom: z)
@@ -221,47 +207,43 @@ final class CanvasViewController: DrawingSurfaceController {
             l.origin = CGPoint(x: o.x / z, y: o.y / z)
             l.relayout()
         }
-        if !canvas.isZooming {
-            let wanted = CGSize(width: extent.width * z, height: extent.height * z)
-            if abs(canvas.contentSize.width - wanted.width) > 1 || abs(canvas.contentSize.height - wanted.height) > 1 {
-                canvas.contentSize = wanted
-            }
-        }
-        growIfNeeded()
+        if !scroller.isZooming { growIfNeeded() }
+        positionSelectionMenu()
     }
 
     /// Keeps adding room to the right and bottom as you move towards the edge.
     private func growIfNeeded() {
-        let z = canvas.zoomScale
-        let o = canvas.contentOffset
+        let z = scroller.zoomScale
+        let o = scroller.contentOffset
         let margin: CGFloat = 3000
         var grew = false
         if (o.x + view.bounds.width) / z > extent.width - margin { extent.width += 8000; grew = true }
         if (o.y + view.bounds.height) / z > extent.height - margin { extent.height += 8000; grew = true }
-        if grew { canvas.contentSize = CGSize(width: extent.width * z, height: extent.height * z) }
+        if grew { placeInk() }
     }
 
     override func resetZoom() {
-        let center = CGPoint(x: (canvas.contentOffset.x + view.bounds.width / 2) / canvas.zoomScale,
-                             y: (canvas.contentOffset.y + view.bounds.height / 2) / canvas.zoomScale)
+        let center = CGPoint(x: (scroller.contentOffset.x + view.bounds.width / 2) / scroller.zoomScale,
+                             y: (scroller.contentOffset.y + view.bounds.height / 2) / scroller.zoomScale)
         UIView.animate(withDuration: 0.3) {
-            self.canvas.zoomScale = 1
-            self.canvas.contentOffset = CGPoint(x: center.x - self.view.bounds.width / 2,
-                                                y: center.y - self.view.bounds.height / 2)
+            self.scroller.zoomScale = 1
+            self.scroller.contentOffset = CGPoint(x: center.x - self.view.bounds.width / 2,
+                                                  y: center.y - self.view.bounds.height / 2)
+        } completion: { _ in
+            self.ink.zoomChanged()
+            self.positionSelectionMenu()
         }
     }
 
     // MARK: Tools
 
-    override func applyTool() { canvas.tool = tool }
-    override func applyRuler() { canvas.isRulerActive = rulerOn }
-    override func applyDrawingPolicy(fingerDraws: Bool) {
-        canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
-    }
+    override func applyTool() { ink.tool = tool }
+    override func applyDrawingPolicy(fingerDraws: Bool) { ink.fingerDraws = fingerDraws }
 
     override func applyCanvasEnabled(_ enabled: Bool) {
         // The board still scrolls and zooms; it just stops taking ink.
-        canvas.drawingGestureRecognizer.isEnabled = enabled
+        ink.isUserInteractionEnabled = enabled
+        if !enabled { ink.clearSelection() }
     }
 
     override func objectLayers(at point: CGPoint) -> (under: ElementsLayer, over: ElementsLayer)? {
@@ -272,8 +254,7 @@ final class CanvasViewController: DrawingSurfaceController {
 
     // MARK: Saving
 
-    private func drawingChanged(_ c: PKCanvasView) {
-        strokeAdded(in: c)
+    override func inkChanged(_ canvas: InkCanvasView, to drawing: InkDrawing) -> InkCanvasView {
         isDirty = true
         saveTask?.cancel()
         saveTask = Task { @MainActor [weak self] in
@@ -281,13 +262,14 @@ final class CanvasViewController: DrawingSurfaceController {
             guard !Task.isCancelled else { return }
             self?.saveAll()
         }
+        return canvas
     }
 
     override func saveAll() {
         saveTask?.cancel()
         saveTask = nil
         guard isDirty else { return }
-        store.saveDrawing(canvas.drawing, notebookId: notebook.id, pageId: pageId)
+        store.saveDrawing(ink.drawing, notebookId: notebook.id, pageId: pageId)
         store.touch(notebook.id)
         isDirty = false
     }
@@ -306,8 +288,10 @@ final class CanvasViewController: DrawingSurfaceController {
     }
 
     func clearAll() {
-        canvas.drawing = PKDrawing()
-        resetStrokeCount(canvas)
+        ink.clearSelection()
+        ink.setDrawing(InkDrawing())
+        undo.removeAllActions()
+        onUndoChanged?(false, false)
         model.items = []
         model.save()
         model.reloadLayers()
@@ -316,12 +300,12 @@ final class CanvasViewController: DrawingSurfaceController {
     }
 
     /// The written area (ink and objects, plus a margin) for PDF export.
-    func drawingForExport() -> (PKDrawing, [PageElement], CGRect) {
+    func drawingForExport() -> (InkDrawing, [PageElement], CGRect) {
         saveAll()
-        var b = canvas.drawing.bounds
+        var b = ink.drawing.bounds
         for e in model.items { b = b.isNull ? e.frame : b.union(e.frame) }
         let rect = (b.isNull || b.isEmpty) ? CGRect(x: 0, y: 0, width: 800, height: 1131) : b.insetBy(dx: -40, dy: -40)
-        return (canvas.drawing, model.items, rect)
+        return (ink.drawing, model.items, rect)
     }
 
     var imageLoader: (String) -> UIImage? {

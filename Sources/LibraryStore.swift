@@ -3,7 +3,7 @@ import PencilKit
 import SwiftUI
 
 /// Keeps folders and notebooks on disk in Documents/Folio.
-/// Each page's ink is stored as its own PencilKit drawing file.
+/// Each page's ink is stored in its own file (Folio's own ink format).
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var folders: [Folder] = []
@@ -364,22 +364,36 @@ final class LibraryStore: ObservableObject {
         try? FileManager.default.removeItem(at: notebookDir(id))
     }
 
-    func pageURL(notebookId: UUID, pageId: UUID) -> URL {
+    /// Folio's own ink file for a page.
+    private func inkURL(_ notebookId: UUID, _ pageId: UUID) -> URL {
+        notebookDir(notebookId).appendingPathComponent(pageId.uuidString + ".ink")
+    }
+
+    /// Where Folio 1.0–1.5 kept a page's ink (a PencilKit drawing).
+    private func legacyDrawingURL(_ notebookId: UUID, _ pageId: UUID) -> URL {
         notebookDir(notebookId).appendingPathComponent(pageId.uuidString + ".drawing")
     }
 
-    func loadDrawing(notebookId: UUID, pageId: UUID) -> PKDrawing {
-        let url = pageURL(notebookId: notebookId, pageId: pageId)
-        guard let data = try? Data(contentsOf: url),
-              let drawing = try? PKDrawing(data: data) else { return PKDrawing() }
-        return drawing
+    func loadDrawing(notebookId: UUID, pageId: UUID) -> InkDrawing {
+        if let data = try? Data(contentsOf: inkURL(notebookId, pageId)), let d = InkDrawing(data: data) {
+            return d
+        }
+        // A page written before Folio had its own pens: convert it (it is saved in the
+        // new format the next time the page changes).
+        if let data = try? Data(contentsOf: legacyDrawingURL(notebookId, pageId)),
+           let old = try? PKDrawing(data: data) {
+            return InkDrawing(pencilKit: old)
+        }
+        return InkDrawing()
     }
 
-    func saveDrawing(_ drawing: PKDrawing, notebookId: UUID, pageId: UUID) {
-        let url = pageURL(notebookId: notebookId, pageId: pageId)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        try? drawing.dataRepresentation().write(to: url, options: .atomic)
+    func saveDrawing(_ drawing: InkDrawing, notebookId: UUID, pageId: UUID) {
+        let url = inkURL(notebookId, pageId)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if (try? drawing.dataRepresentation().write(to: url, options: .atomic)) != nil {
+            try? fm.removeItem(at: legacyDrawingURL(notebookId, pageId))
+        }
     }
 
     func insertPage(notebookId: UUID, at index: Int) -> UUID? {
@@ -399,7 +413,8 @@ final class LibraryStore: ObservableObject {
         notebooks[i].outline?.removeAll { $0.pageId == pageId }
         notebooks[i].modifiedAt = Date()
         let fm = FileManager.default
-        try? fm.removeItem(at: pageURL(notebookId: notebookId, pageId: pageId))
+        try? fm.removeItem(at: inkURL(notebookId, pageId))
+        try? fm.removeItem(at: legacyDrawingURL(notebookId, pageId))
         try? fm.removeItem(at: elementsURL(notebookId, pageId))
         try? fm.removeItem(at: backgroundURL(notebookId, pageId))
         persist()

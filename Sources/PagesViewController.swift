@@ -1,11 +1,10 @@
 import UIKit
-import PencilKit
 
 /// One page: paper colour + template lines (vector layers) or an imported
-/// background, objects under the ink, a live PencilKit canvas, and tape on top.
+/// background, objects under the ink, Folio's own ink, and tape on top.
 final class PageView: UIView {
     let pageId: UUID
-    let canvas = PKCanvasView()
+    let ink: InkCanvasView
     let backgroundView = UIImageView()
     let model: ElementModel
     let under: ElementsLayer
@@ -27,9 +26,10 @@ final class PageView: UIView {
         }
     }
 
-    init(pageId: UUID, template: PageTemplate, paper: PaperColor, drawing: PKDrawing,
+    init(pageId: UUID, template: PageTemplate, paper: PaperColor, drawing: InkDrawing,
          elements: [PageElement], background: UIImage?) {
         self.pageId = pageId
+        ink = InkCanvasView(size: TemplateRenderer.pageSize)
         self.template = template
         self.paper = paper
         self.background = background
@@ -48,49 +48,24 @@ final class PageView: UIView {
         addSubview(backgroundView)
         addSubview(under)
 
-        canvas.backgroundColor = .clear
-        canvas.isOpaque = false
-        canvas.isScrollEnabled = false
-        canvas.bounces = false
-        canvas.bouncesZoom = false
-        canvas.showsVerticalScrollIndicator = false
-        canvas.showsHorizontalScrollIndicator = false
-        canvas.contentInsetAdjustmentBehavior = .never
-        canvas.minimumZoomScale = 1
-        canvas.maximumZoomScale = 1
-        // The page itself never pans or pinches on its own: the notebook's scroll
-        // view does that. (A pinch landing on the page used to zoom only the ink,
-        // which made the writing slide away from the lines.)
-        canvas.panGestureRecognizer.isEnabled = false
-        canvas.pinchGestureRecognizer?.isEnabled = false
-        // Keep ink colours exactly as chosen, even when the iPad is in dark mode.
-        canvas.overrideUserInterfaceStyle = .light
-        canvas.drawing = drawing
-        addSubview(canvas)
+        ink.setDrawing(drawing)
+        addSubview(ink)
         addSubview(over)
         rebuildTemplate()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// Lays the page out at a real on-screen size so PencilKit and the template
-    /// render natively at that size (no stretched bitmaps, so nothing goes blurry).
+    /// Lays the page out at a real on-screen size so the template renders natively at that
+    /// size. The ink keeps page units and is scaled; its tiles redraw at the detail needed.
     func apply(zoom z: CGFloat) {
         zoom = z
         let size = CGSize(width: unitSize.width * z, height: unitSize.height * z)
         let rect = CGRect(origin: .zero, size: size)
-        canvas.frame = rect
-        // Lock the page canvas to exactly this zoom. With the minimum equal to
-        // the maximum, PencilKit can't pinch-zoom the ink on its own (that was
-        // what made the writing grow while the lines stayed put); the pinch
-        // goes to the notebook instead, which scales paper and ink together.
-        canvas.minimumZoomScale = z
-        canvas.maximumZoomScale = z
-        canvas.zoomScale = z
-        canvas.pinchGestureRecognizer?.isEnabled = false
-        canvas.panGestureRecognizer.isEnabled = false
-        canvas.contentSize = size
-        canvas.contentOffset = .zero
+        ink.setSize(unitSize)
+        ink.transform = CGAffineTransform(scaleX: z, y: z)
+        ink.center = CGPoint(x: size.width / 2, y: size.height / 2)
+        ink.zoomChanged()
         let o = extent.originalRect
         backgroundView.frame = CGRect(x: o.minX * z, y: o.minY * z, width: o.width * z, height: o.height * z)
         for l in [under, over] {
@@ -136,17 +111,13 @@ final class PageView: UIView {
     func markStale() { zoom = -1 }
 
     var content: PageContent {
-        PageContent(drawing: canvas.drawing, elements: model.items, background: background, extent: extent)
+        PageContent(drawing: ink.drawing, elements: model.items, background: background, extent: extent)
     }
 }
 
 /// The scrolling stack of pages inside a notebook (down, or across in horizontal view).
 final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate {
     private let scrollView = UIScrollView()
-    private lazy var canvasDelegate = CanvasEvents(
-        changed: { [weak self] c in self?.drawingChanged(c) },
-        began: { [weak self] in self?.toolUseBegan() },
-        ended: { [weak self] in self?.toolUseEnded() })
     private let contentView = UIView()
     private(set) var pageViews: [PageView] = []
 
@@ -213,10 +184,8 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
                           elements: store.loadElements(notebookId: nbId, pageId: id),
                           background: store.loadBackground(notebookId: nbId, pageId: id))
         pv.extent = notebook.extent(id)
-        pv.canvas.delegate = canvasDelegate
-        pv.canvas.tool = tool
-        pv.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
-        pv.canvas.isRulerActive = rulerOn
+        pv.ink.setSize(pv.unitSize)
+        wireInk(pv.ink)
         let lib = self.store
         pv.model.imageLoader = { [weak lib] name in lib?.loadImageAsset(name, notebookId: nbId) }
         pv.model.onSave = { [weak self] items in
@@ -228,8 +197,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             l.onTouchingObject = { [weak self] active in self?.objectTouch(active) }
             l.editing = editorTool == .text && !readOnly
         }
-        pv.canvas.isUserInteractionEnabled = canvasEnabled
-        resetStrokeCount(pv.canvas)
+        pv.ink.isUserInteractionEnabled = canvasEnabled
         contentView.addSubview(pv)
         return pv
     }
@@ -369,6 +337,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         guard sv === scrollView else { return }
         updateInsets()
         reportZoom()
+        positionSelectionMenu()
     }
 
     func scrollViewDidEndZooming(_ sv: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
@@ -385,6 +354,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         isBaking = false
         reportPage(force: true)
         reportZoom()
+        positionSelectionMenu()
     }
 
     override func resetZoom() {
@@ -415,6 +385,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     func scrollViewDidScroll(_ sv: UIScrollView) {
         guard sv === scrollView else { return }
         applyZoomToNearbyPages()
+        positionSelectionMenu()
         guard !isBaking else { return }
         reportPage(force: false)
     }
@@ -460,25 +431,23 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     private var canvasEnabled = true
 
-    override func applyTool() {
-        for pv in pageViews { pv.canvas.tool = tool }
-        zoomBox?.canvas.tool = tool
-    }
+    private var allInk: [InkCanvasView] { pageViews.map(\.ink) + (zoomBox.map { [$0.ink] } ?? []) }
 
-    override func applyRuler() {
-        for pv in pageViews { pv.canvas.isRulerActive = rulerOn }
+    override func applyTool() {
+        for ink in allInk { ink.tool = tool }
     }
 
     override func applyDrawingPolicy(fingerDraws: Bool) {
-        for pv in pageViews { pv.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly }
-        zoomBox?.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
+        for ink in allInk { ink.fingerDraws = fingerDraws }
     }
 
     override func applyCanvasEnabled(_ enabled: Bool) {
         canvasEnabled = enabled
-        // Switching the canvas off lets taps reach the objects under the ink.
-        for pv in pageViews { pv.canvas.isUserInteractionEnabled = enabled }
-        zoomBox?.canvas.isUserInteractionEnabled = enabled
+        // Switching the ink off lets taps reach the objects under it.
+        for ink in allInk {
+            ink.isUserInteractionEnabled = enabled
+            if !enabled { ink.clearSelection() }
+        }
     }
 
     override func objectLayers(at point: CGPoint) -> (under: ElementsLayer, over: ElementsLayer)? {
@@ -492,15 +461,22 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     // MARK: Saving
 
-    private func drawingChanged(_ canvasView: PKCanvasView) {
-        if let box = zoomBox, canvasView === box.canvas {
-            strokeAdded(in: canvasView)
-            box.copyToPage()
-            return
+    override func inkChanged(_ canvas: InkCanvasView, to drawing: InkDrawing) -> InkCanvasView {
+        // Written in the zoom box: it lands on the page, and the page is what undo restores.
+        if let box = zoomBox, canvas === box.ink {
+            guard let pv = pageViews.first(where: { $0 === box.page }) else { return canvas }
+            pv.ink.setDrawing(drawing)
+            scheduleSave(pv)
+            box.wrote(drawing)
+            return pv.ink
         }
-        guard let pv = pageViews.first(where: { $0.canvas === canvasView }) else { return }
-        strokeAdded(in: canvasView)
+        guard let pv = pageViews.first(where: { $0.ink === canvas }) else { return canvas }
+        scheduleSave(pv)
         zoomBox?.pageChanged(pv)
+        return canvas
+    }
+
+    private func scheduleSave(_ pv: PageView) {
         dirty.insert(pv.pageId)
         saveTasks[pv.pageId]?.cancel()
         let pid = pv.pageId
@@ -513,7 +489,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
 
     private func save(pageId: UUID) {
         guard dirty.contains(pageId), let pv = pageViews.first(where: { $0.pageId == pageId }) else { return }
-        store.saveDrawing(pv.canvas.drawing, notebookId: notebook.id, pageId: pageId)
+        store.saveDrawing(pv.ink.drawing, notebookId: notebook.id, pageId: pageId)
         dirty.remove(pageId)
         saveTasks[pageId] = nil
         store.touch(notebook.id)
@@ -524,7 +500,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         saveTasks.removeAll()
         for pid in dirty {
             if let pv = pageViews.first(where: { $0.pageId == pid }) {
-                store.saveDrawing(pv.canvas.drawing, notebookId: notebook.id, pageId: pid)
+                store.saveDrawing(pv.ink.drawing, notebookId: notebook.id, pageId: pid)
             }
         }
         if !dirty.isEmpty { store.touch(notebook.id) }
@@ -593,8 +569,8 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         if pageViews.count == 1 {
             // Last page: just clear it.
             let pv = pageViews[0]
-            pv.canvas.drawing = PKDrawing()
-            resetStrokeCount(pv.canvas)
+            pv.ink.clearSelection()
+            pv.ink.setDrawing(InkDrawing())
             pv.model.items = []
             pv.model.save()
             pv.model.reloadLayers()
@@ -722,14 +698,11 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         if zoomBox != nil { closeZoomBox(); return }
         guard pageViews.indices.contains(currentPage) else { return }
         let box = ZoomBox(owner: self, page: pageViews[currentPage])
-        box.canvas.delegate = canvasDelegate
-        box.canvas.tool = tool
-        box.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
-        box.canvas.isUserInteractionEnabled = canvasEnabled
+        wireInk(box.ink)
+        box.ink.isUserInteractionEnabled = canvasEnabled
         zoomBox = box
         view.insertSubview(box.panel, belowSubview: laser)
         box.layout(in: view.bounds)
-        resetStrokeCount(box.canvas)
         updateInsets()
         box.panel.transform = CGAffineTransform(translationX: 0, y: ZoomBox.panelHeight)
         box.panel.alpha = 0
@@ -744,6 +717,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     func closeZoomBox() {
         guard let box = zoomBox else { return }
         zoomBox = nil
+        box.ink.clearSelection()
         onZoomBox?(false)
         box.frameView.removeFromSuperview()
         box.grip.removeFromSuperview()
@@ -761,20 +735,6 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         scrollView.scrollRectToVisible(r.insetBy(dx: -30, dy: -60), animated: true)
     }
 
-    fileprivate func copyToPage(_ drawing: PKDrawing, page: PageView) {
-        page.canvas.drawing = drawing
-        resetStrokeCount(page.canvas)
-        dirty.insert(page.pageId)
-        saveTasks[page.pageId]?.cancel()
-        let pid = page.pageId
-        saveTasks[pid] = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            guard !Task.isCancelled, let self else { return }
-            self.save(pageId: pid)
-        }
-    }
-
-    fileprivate func resetCount(_ c: PKCanvasView) { resetStrokeCount(c) }
 }
 
 /// Noteshelf-style Zoom Box: write large in a magnified strip at the bottom of the
@@ -785,8 +745,9 @@ final class ZoomBox: NSObject {
     unowned let owner: PagesViewController
     let page: PageView
     let panel = UIView()
-    let canvas = PKCanvasView()
+    let ink: InkCanvasView
     /// The page's lines (or imported background), shown behind the magnified ink.
+    /// It also clips the ink to the writing area.
     private let paperClip = UIView()
     private let paperImage = UIImageView()
     let frameView = UIView()
@@ -795,11 +756,12 @@ final class ZoomBox: NSObject {
     /// The part of the page being written in, in page units.
     private(set) var region: CGRect
     private var zoom: CGFloat = 2.4
-    private var syncing = false
+    private var strokeCount = 0
 
     init(owner: PagesViewController, page: PageView) {
         self.owner = owner
         self.page = page
+        ink = InkCanvasView(size: page.unitSize)
         region = CGRect(x: 60, y: 120, width: 340, height: 100)
         super.init()
 
@@ -813,22 +775,13 @@ final class ZoomBox: NSObject {
         paperClip.backgroundColor = page.paper.uiColor
         paperClip.layer.cornerRadius = 14
         paperClip.clipsToBounds = true
-        paperClip.isUserInteractionEnabled = false
         paperImage.image = page.backgroundView.image ?? Self.templateImage(page)
         paperImage.contentMode = page.backgroundView.image == nil ? .scaleToFill : .scaleAspectFit
         paperClip.addSubview(paperImage)
+        ink.setDrawing(page.ink.drawing)
+        strokeCount = page.ink.drawing.strokes.count
+        paperClip.addSubview(ink)
         panel.addSubview(paperClip)
-        canvas.backgroundColor = .clear
-        canvas.isOpaque = false
-        canvas.overrideUserInterfaceStyle = .light
-        canvas.isScrollEnabled = false
-        canvas.bounces = false
-        canvas.contentInsetAdjustmentBehavior = .never
-        canvas.layer.cornerRadius = 14
-        canvas.clipsToBounds = true
-        canvas.panGestureRecognizer.isEnabled = false
-        canvas.drawing = page.canvas.drawing
-        panel.addSubview(canvas)
 
         let buttons: [(String, Selector)] = [("chevron.left", #selector(left)), ("chevron.right", #selector(right)),
                                             ("return", #selector(newLine)), ("xmark", #selector(close))]
@@ -868,7 +821,6 @@ final class ZoomBox: NSObject {
         panel.frame = CGRect(x: (bounds.width - w) / 2, y: bounds.height - Self.panelHeight - 78,
                              width: w, height: Self.panelHeight)
         let canvasFrame = CGRect(x: 14, y: 14, width: w - 14 * 3 - 46, height: Self.panelHeight - 28)
-        canvas.frame = canvasFrame
         paperClip.frame = canvasFrame
         for i in 0..<4 {
             panel.viewWithTag(100 + i)?.frame = CGRect(x: w - 14 - 46, y: 14 + CGFloat(i) * 56, width: 46, height: 46)
@@ -886,13 +838,12 @@ final class ZoomBox: NSObject {
         grip.frame = CGRect(x: frameView.frame.minX - 14, y: frameView.frame.minY - 14, width: 28, height: 28)
         page.bringSubviewToFront(frameView)
         page.bringSubviewToFront(grip)
-        canvas.minimumZoomScale = zoom
-        canvas.maximumZoomScale = zoom
-        canvas.zoomScale = zoom
-        canvas.pinchGestureRecognizer?.isEnabled = false
-        canvas.contentSize = CGSize(width: page.unitSize.width * zoom, height: page.unitSize.height * zoom)
-        canvas.contentOffset = CGPoint(x: region.minX * zoom, y: region.minY * zoom)
         let ps = page.unitSize
+        ink.setSize(ps)
+        ink.transform = CGAffineTransform(scaleX: zoom, y: zoom)
+        ink.center = CGPoint(x: (ps.width / 2 - region.minX) * zoom, y: (ps.height / 2 - region.minY) * zoom)
+        ink.zoomChanged()
+        owner.positionSelectionMenu()
         paperImage.frame = CGRect(x: -region.minX * zoom, y: -region.minY * zoom, width: ps.width * zoom, height: ps.height * zoom)
     }
 
@@ -936,28 +887,21 @@ final class ZoomBox: NSObject {
         refreshFrame()
     }
 
-    /// Writing in the box goes onto the page; near the right edge the box moves on.
-    func copyToPage() {
-        guard !syncing else { return }
-        let d = canvas.drawing
-        guard d.strokes.count != page.canvas.drawing.strokes.count || d.bounds != page.canvas.drawing.bounds else { return }
-        syncing = true
-        owner.copyToPage(d, page: page)
-        syncing = false
-        if let last = d.strokes.last, last.renderBounds.maxX > region.maxX - region.width * 0.16,
-           last.renderBounds.minX > region.minX {
+    /// Something was written in the box (it is already on the page). A new stroke near
+    /// the right edge moves the box on, like Noteshelf.
+    func wrote(_ d: InkDrawing) {
+        defer { strokeCount = d.strokes.count }
+        guard d.strokes.count > strokeCount, let last = d.strokes.last else { return }
+        if last.bounds.maxX > region.maxX - region.width * 0.16, last.bounds.minX > region.minX {
+            ink.clearSelection()
             right()
         }
     }
 
-    /// Writing straight on the page (or erasing there) shows up in the box too.
+    /// Writing straight on the page (or erasing there, or undo) shows up in the box too.
     func pageChanged(_ pv: PageView) {
-        guard pv === page, !syncing else { return }
-        let d = page.canvas.drawing
-        guard d.strokes.count != canvas.drawing.strokes.count || d.bounds != canvas.drawing.bounds else { return }
-        syncing = true
-        canvas.drawing = d
-        owner.resetCount(canvas)
-        syncing = false
+        guard pv === page else { return }
+        ink.setDrawing(page.ink.drawing)
+        strokeCount = page.ink.drawing.strokes.count
     }
 }
