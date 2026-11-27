@@ -315,9 +315,10 @@ struct InkPen: Equatable {
         if style == .highlighter || shapes { return width }
         let k = CGFloat(feel.pressure)
         if style == .oval {
-            // Width here is the tip's width: it spreads as you press.
+            // Width here is the tip's width: it spreads as you press, in step with the pressure
+            // (no easing, so light writing really is thin and pressing really is bold).
             let r = ovalRange
-            let pe = sin(min(max(p, 0), 1) * .pi / 2)
+            let pe = min(max(p, 0), 1)
             return width * (r.hLo + (r.hHi - r.hLo) * pe)
         }
         if style.isNib {

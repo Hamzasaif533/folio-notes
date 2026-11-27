@@ -1575,7 +1575,7 @@ struct EditorView: View {
             if DemoMode.tipFlat { f.tipFlatness = 1 }
             if DemoMode.tipRound || DemoMode.tipFlat { tools.pen.feel = f }
         }
-        if DemoMode.showPen { after(1.2) { showPenTypes = true } }
+        if DemoMode.showPen { after(2.5) { showPenTypes = true } }
         if DemoMode.editColor { tools.tool = .pen; tools.pen.colorHex = tools.penQuickColors[0]; after(1.2) { editingColor = 0 } }
         if DemoMode.squeeze { after(1.2) { withAnimation(.easeOut(duration: 0.2)) { controller.squeezePoint = CGPoint(x: 520, y: 640) } } }
         if DemoMode.sidebar { after(1.0) { showSidebar = true } }

@@ -107,8 +107,8 @@ enum DemoMode {
 
     private static let penRows: [(String, Double)] = [("Round", 0), ("25%", 0.25), ("Middle (default)", 0.5),
                                                        ("75%", 0.75), ("Flat", 1)]
-    private static let rowTop: CGFloat = 80
-    private static let rowGap: CGFloat = 170
+    private static let rowTop: CGFloat = 150
+    private static let rowGap: CGFloat = 160
 
     /// A fountain-pen stroke along `pts`, written like a real Pencil: lighter for the first
     /// moments after touching down, then at `pressure` (which can depend on direction).
@@ -159,9 +159,9 @@ enum DemoMode {
                                               flatness: spec.1, width: 6, hex: red, liftSpeed: 0) { _ in p })
             }
             let hard: (CGFloat) -> CGFloat = { dir in 0.45 + 0.4 * sin(dir) } // harder going down
-            strokes.append(fountainStroke(loops(at: CGPoint(x: 360, y: y + 62), count: 3, size: 26),
+            strokes.append(fountainStroke(loops(at: CGPoint(x: 360, y: y + 62), count: 2, size: 26),
                                           flatness: spec.1, width: 6, hex: red, liftSpeed: 1600, pressure: hard))
-            strokes.append(fountainStroke(loops(at: CGPoint(x: 560, y: y + 62), count: 3, size: 26),
+            strokes.append(fountainStroke(loops(at: CGPoint(x: 560, y: y + 62), count: 2, size: 26),
                                           flatness: spec.1, width: 6, hex: red, liftSpeed: 0, pressure: hard))
         }
         // Big, to check the edges are smooth.
@@ -175,7 +175,7 @@ enum DemoMode {
         var out: [PageElement] = []
         let heads = [("Light", 40), ("Normal", 145), ("Hard", 250), ("Quick lift", 380), ("Stop, then lift", 580)]
         for (t, x) in heads {
-            out.append(PageElement(kind: .text, x: CGFloat(x), y: 30, w: 190, h: 30, text: t, colorHex: "#6B6B70", fontSize: 18))
+            out.append(PageElement(kind: .text, x: CGFloat(x), y: 110, w: 190, h: 30, text: t, colorHex: "#6B6B70", fontSize: 18))
         }
         for (row, spec) in penRows.enumerated() {
             out.append(PageElement(kind: .text, x: 40, y: rowTop + CGFloat(row) * rowGap + 2, w: 400, h: 30,
