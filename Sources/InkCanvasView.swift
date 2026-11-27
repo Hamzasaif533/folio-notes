@@ -21,8 +21,10 @@ final class InkCanvasView: UIView {
     private var renderHidden: Set<UUID> = []
 
     var tool: InkTool = .none {
-        didSet { if tool != oldValue { clearSelection(); eraserRing.isHidden = true } }
+        didSet { if tool != oldValue { clearSelection(); eraserRing.isHidden = true; loopCandidate = nil } }
     }
+    /// A circle drawn then tapped switched this page to the lasso (the editor should follow).
+    var onSwitchToLasso: (() -> Void)?
     var fingerDraws = false
 
     var onBegan: (() -> Void)?
@@ -31,6 +33,10 @@ final class InkCanvasView: UIView {
     var onCommit: ((InkCanvasView, InkDrawing, InkDrawing) -> Void)?
     /// The lasso selection appeared, moved or went away.
     var onSelectionChanged: ((InkCanvasView) -> Void)?
+    /// The eraser passed over these points (ink coordinates) with this radius.
+    var onErase: ((InkCanvasView, [CGPoint], CGFloat) -> Void)?
+    /// The eraser was lifted.
+    var onEraseEnded: (() -> Void)?
     /// A finger is dragging the selection, so the page shouldn't scroll.
     var onObjectTouch: ((Bool) -> Void)?
     /// Ruler: for a stroke starting here, a function that keeps it on the ruler's edge (or nil).
@@ -191,6 +197,11 @@ final class InkCanvasView: UIView {
         switch tool {
         case .pen(let pen):
             activeTouch = t
+            // A tap inside a circle you just drew may turn it into a lasso.
+            loopTap = nil
+            if let c = loopCandidate, Date().timeIntervalSince(c.time) < 6, c.poly.contains(p) {
+                loopTap = (t.timestamp, p)
+            }
             beginStroke(t, pen: pen)
         case .eraser:
             activeTouch = t
@@ -228,8 +239,23 @@ final class InkCanvasView: UIView {
         guard let t = activeTouch, touches.contains(t) else { return }
         switch mode {
         case .drawing:
-            if case .pen(let pen) = tool { addPoint(t, pen: pen); catchUp(t, pen: pen); finishStroke(pen: pen) }
-        case .erasing: finishErase()
+            if case .pen(let pen) = tool {
+                if let tap = loopTap, let c = loopCandidate, t.timestamp - tap.time < 0.4,
+                   points.allSatisfy({ hypot($0.cg.x - tap.at.x, $0.cg.y - tap.at.y) < 6 / ds }) {
+                    // Just a tap, not writing: no dot, the circle becomes the lasso.
+                    liveLayer.path = nil
+                    points = []
+                    snap = nil
+                    loopTap = nil
+                    lassoFromLoop(c, tapAt: tap.at)
+                } else {
+                    loopTap = nil
+                    addPoint(t, pen: pen); catchUp(t, pen: pen); finishStroke(pen: pen)
+                }
+            }
+        case .erasing:
+            finishErase()
+            onEraseEnded?()
         case .lassoing: finishLasso()
         case .manipulating:
             finishManipulation()
@@ -325,14 +351,24 @@ final class InkCanvasView: UIView {
         if let last = points.last {
             let dx = loc.x - last.cg.x, dy = loc.y - last.cg.y
             if hypot(dx, dy) > 0.6 / ds { direction = atan2(dy, dx) }
-            if t.type != .pencil, pen.style == .fountain || pen.style == .brush {
+            if t.type != .pencil, pen.style == .fountain {
                 // Fingers have no pressure: a quick line is a thin line.
                 let dt = max(t.timestamp - lastTime, 0.001)
                 let speed = hypot(dx, dy) * ds / CGFloat(dt)
                 pressure = min(max(1 - speed / 1800, 0.25), 0.85)
             }
         }
-        let w = pen.width(pressure: pressure, direction: direction)
+        if t.type == .pencil, pen.style == .fountain, let last = points.last {
+            // Ink flows thinner on a quick stroke and pools a little on a slow one.
+            let dt = max(t.timestamp - lastTime, 0.001)
+            let speed = hypot(loc.x - last.cg.x, loc.y - last.cg.y) * ds / CGFloat(dt)
+            pressure *= 1.08 - 0.4 * min(speed / 2600, 1)
+        }
+        var w = pen.width(pressure: pressure, direction: direction)
+        if t.type == .pencil, pen.style == .fountain {
+            // A tilted Pencil writes on more of the nib: a little wider.
+            w *= 1 + 0.22 * (1 - min(t.altitudeAngle / (.pi / 2), 1))
+        }
         lastTime = t.timestamp
         smoothedWidth = smoothedWidth == 0 ? w : smoothedWidth + (w - smoothedWidth) * 0.3
         return max(smoothedWidth, 0.25)
@@ -367,6 +403,9 @@ final class InkCanvasView: UIView {
     private func finishStroke(pen: InkPen) {
         defer { points = []; snap = nil }
         guard !points.isEmpty else { liveLayer.path = nil; return }
+        let raw = points.map(\.cg)
+        loopCandidate = nil
+        if !pen.shapes, pen.style != .highlighter, Self.scribbleEnabled, scribbleErase(raw, pen: pen) { return }
         let color = InkColor(hex: pen.colorHex, opacity: pen.opacity)
         var stroke = InkStroke(style: pen.style, color: color, points: pen.tapered(points))
         if pen.shapes, let clean = StrokeShaper.recognizeShape(points.map { $0.cg }) {
@@ -385,6 +424,227 @@ final class InkCanvasView: UIView {
         liveLayer.path = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { glow.removeFromSuperlayer() }
         onCommit?(self, before, drawing)
+        // A loop drawn around some ink: tap inside it soon after to lasso what's in it.
+        if !pen.shapes, Self.circleLassoEnabled, let poly = Self.loop(raw),
+           !strokeIDs(inside: poly, excluding: stroke.id).isEmpty {
+            loopCandidate = LoopCandidate(strokeID: stroke.id, poly: poly, time: Date())
+        }
+    }
+
+    // MARK: Pen gestures: scribble to erase, circle then tap to lasso
+
+    static var scribbleEnabled: Bool { UserDefaults.standard.object(forKey: "folio.scribbleErase") as? Bool ?? true }
+    static var circleLassoEnabled: Bool { UserDefaults.standard.object(forKey: "folio.circleLasso") as? Bool ?? true }
+
+    private struct LoopCandidate {
+        let strokeID: UUID
+        let poly: CGPath
+        let time: Date
+    }
+    private var loopCandidate: LoopCandidate?
+    private var loopTap: (time: TimeInterval, at: CGPoint)?
+
+    private static func box(_ pts: [CGPoint]) -> CGRect {
+        pts.reduce(CGRect.null) { $0.union(CGRect(origin: $1, size: .zero)) }
+    }
+
+    private static func length(_ pts: [CGPoint]) -> CGFloat {
+        zip(pts, pts.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+    }
+
+    /// How many times a value turns back by more than `threshold` (back-and-forth strokes).
+    private static func reversals(_ v: [CGFloat], threshold: CGFloat) -> Int {
+        guard let first = v.first else { return 0 }
+        var extreme = first
+        var dir: CGFloat = 0
+        var count = 0
+        for x in v.dropFirst() {
+            if dir == 0 {
+                if abs(x - extreme) > threshold { dir = x > extreme ? 1 : -1; extreme = x }
+                continue
+            }
+            if (dir > 0 && x > extreme) || (dir < 0 && x < extreme) {
+                extreme = x
+            } else if abs(x - extreme) > threshold {
+                count += 1
+                dir = -dir
+                extreme = x
+            }
+        }
+        return count
+    }
+
+    /// A closed, roundish loop (start and end close together), as a polygon.
+    private static func loop(_ pts: [CGPoint]) -> CGPath? {
+        guard pts.count >= 16, let f = pts.first, let l = pts.last else { return nil }
+        let b = box(pts)
+        let span = max(b.width, b.height)
+        guard span > 30, min(b.width, b.height) > span * 0.3 else { return nil }
+        let len = length(pts)
+        guard hypot(f.x - l.x, f.y - l.y) < span * 0.3, len > span * 2.3, len < span * 5 else { return nil }
+        let p = CGMutablePath()
+        p.addLines(between: pts)
+        p.closeSubpath()
+        return p
+    }
+
+    /// Strokes that are mostly inside the loop.
+    private func strokeIDs(inside poly: CGPath, excluding skip: UUID?) -> Set<UUID> {
+        var ids: Set<UUID> = []
+        for s in drawing.strokes where s.id != skip && poly.boundingBoxOfPath.intersects(s.bounds) {
+            let step = max(1, s.points.count / 40)
+            var inside = 0, total = 0
+            var i = 0
+            while i < s.points.count {
+                total += 1
+                if poly.contains(s.points[i].cg) { inside += 1 }
+                i += step
+            }
+            if total > 0 && Double(inside) / Double(total) >= 0.5 { ids.insert(s.id) }
+        }
+        return ids
+    }
+
+    /// Scribbling back and forth over ink rubs it out. Returns true if it did (the scribble isn't kept).
+    private func scribbleErase(_ pts: [CGPoint], pen: InkPen) -> Bool {
+        guard pts.count >= 12 else { return false }
+        let b = Self.box(pts)
+        let span = max(b.width, b.height)
+        guard span > 8, Self.length(pts) > span * 4 else { return false }
+        let turns = max(Self.reversals(pts.map(\.x), threshold: max(b.width * 0.3, 3)),
+                        Self.reversals(pts.map(\.y), threshold: max(b.height * 0.3, 3)))
+        guard turns >= 5 else { return false }
+        let r = max(pen.width / 2, 1.5)
+        let dense = InkRenderer.densify(pts.map { InkPoint($0, w: pen.width) }, spacing: max(r * 0.8, 1)).map(\.cg)
+        let area = b.insetBy(dx: -r, dy: -r)
+        var hit: [InkStroke] = []
+        for s in drawing.strokes where s.bounds.intersects(area) {
+            // Only ink that the scribble mostly covers, so writing next to words never erases them.
+            let inter = s.bounds.intersection(area)
+            let cover = (inter.width * inter.height) / max(s.bounds.width * s.bounds.height, 0.01)
+            guard cover >= 0.5 || (s.bounds.width < 6 && s.bounds.height < 6) else { continue }
+            if Self.touches(s, samples: dense, radius: r) { hit.append(s) }
+        }
+        guard !hit.isEmpty else { return false }
+        let before = drawing
+        let ids = Set(hit.map(\.id))
+        drawing.strokes.removeAll { ids.contains($0.id) }
+        publish()
+        invalidate(hit.reduce(b) { $0.union($1.bounds) })
+        // The scribble and the ink under it fade away together.
+        let scribble = CAShapeLayer()
+        scribble.path = liveLayer.path
+        scribble.fillColor = liveLayer.fillColor
+        scribble.strokeColor = liveLayer.strokeColor
+        scribble.lineWidth = liveLayer.lineWidth
+        scribble.contentsScale = sharpness()
+        overlay.layer.addSublayer(scribble)
+        liveLayer.path = nil
+        fadeAndRemove(scribble, duration: 0.25)
+        for s in hit.prefix(80) {
+            let l = CAShapeLayer()
+            l.path = s.style == .highlighter ? InkRenderer.centerline(s.points) : InkRenderer.outline(s.points)
+            l.contentsScale = sharpness()
+            if s.style == .highlighter {
+                l.fillColor = nil
+                l.strokeColor = s.color.uiColor.cgColor
+                l.lineWidth = s.points.first?.width ?? 10
+                l.opacity = 0.35
+            } else {
+                l.fillColor = s.color.uiColor.cgColor
+            }
+            overlay.layer.insertSublayer(l, below: scribble)
+            fadeAndRemove(l, duration: 0.3)
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        onCommit?(self, before, drawing)
+        return true
+    }
+
+    private func fadeAndRemove(_ l: CALayer, duration: CFTimeInterval, delay: CFTimeInterval = 0) {
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = l.opacity
+        a.toValue = 0
+        a.beginTime = CACurrentMediaTime() + delay
+        a.duration = duration
+        a.fillMode = .both
+        a.isRemovedOnCompletion = false
+        l.add(a, forKey: "fade")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + duration + 0.05) { l.removeFromSuperlayer() }
+    }
+
+    /// The circle you drew turns into a lasso around everything inside it.
+    private func lassoFromLoop(_ c: LoopCandidate, tapAt tap: CGPoint) {
+        loopCandidate = nil
+        guard let circle = drawing.strokes.first(where: { $0.id == c.strokeID }) else { return }
+        let ids = strokeIDs(inside: c.poly, excluding: c.strokeID)
+        guard !ids.isEmpty else { return }
+        let before = drawing
+        drawing.strokes.removeAll { $0.id == c.strokeID }
+        publish()
+        invalidate(circle.bounds)
+        onCommit?(self, before, drawing)
+
+        // The ink circle fades as a dashed selection loop runs around it.
+        let ink = CAShapeLayer()
+        ink.path = InkRenderer.outline(circle.points)
+        ink.fillColor = circle.color.uiColor.cgColor
+        ink.contentsScale = sharpness()
+        overlay.layer.addSublayer(ink)
+        fadeAndRemove(ink, duration: 0.3)
+
+        let loopLayer = CAShapeLayer()
+        loopLayer.path = c.poly
+        loopLayer.fillColor = Self.selectionBlue.withAlphaComponent(0.08).cgColor
+        loopLayer.strokeColor = Self.selectionBlue.cgColor
+        loopLayer.lineWidth = 2 / ds
+        loopLayer.lineDashPattern = [NSNumber(value: Double(7 / ds)), NSNumber(value: Double(5 / ds))]
+        loopLayer.contentsScale = sharpness()
+        overlay.layer.addSublayer(loopLayer)
+        let draw = CABasicAnimation(keyPath: "strokeEnd")
+        draw.fromValue = 0
+        draw.toValue = 1
+        draw.duration = 0.32
+        draw.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        loopLayer.add(draw, forKey: "draw")
+        let march = CABasicAnimation(keyPath: "lineDashPhase")
+        march.fromValue = 0
+        march.toValue = -24 / ds
+        march.duration = 0.5
+        march.repeatCount = .infinity
+        loopLayer.add(march, forKey: "march")
+        fadeAndRemove(loopLayer, duration: 0.35, delay: 0.6)
+
+        // A ripple where you tapped.
+        let size = 56 / ds
+        let ripple = CAShapeLayer()
+        ripple.frame = CGRect(x: tap.x - size / 2, y: tap.y - size / 2, width: size, height: size)
+        ripple.path = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: size, height: size), transform: nil)
+        ripple.fillColor = Self.selectionBlue.withAlphaComponent(0.15).cgColor
+        ripple.strokeColor = Self.selectionBlue.cgColor
+        ripple.lineWidth = 2 / ds
+        ripple.contentsScale = sharpness()
+        overlay.layer.addSublayer(ripple)
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 0.15
+        grow.toValue = 1
+        grow.duration = 0.4
+        grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        ripple.add(grow, forKey: "grow")
+        fadeAndRemove(ripple, duration: 0.4)
+
+        tool = .lasso
+        onSwitchToLasso?()
+        select(ids)
+        // The picked ink lifts a little, then settles.
+        let pop = CASpringAnimation(keyPath: "transform.scale")
+        pop.fromValue = 1.07
+        pop.toValue = 1
+        pop.damping = 11
+        pop.initialVelocity = 2
+        pop.duration = pop.settlingDuration
+        selectionSnapshot.add(pop, forKey: "pop")
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
     // MARK: Erasers
@@ -422,6 +682,7 @@ final class InkCanvasView: UIView {
             }
         }
         lastEraserPoint = p
+        onErase?(self, samples, r)
         guard case .eraser(let precise, _) = tool else { return }
         let area = samples.reduce(CGRect.null) { $0.union(CGRect(x: $1.x - r, y: $1.y - r, width: r * 2, height: r * 2)) }
         var changed = CGRect.null

@@ -57,6 +57,8 @@ final class ElementsLayer: UIView {
     /// Object editing (the Text Box tool): drag, resize, type.
     var editing = false { didSet { if !editing { select(nil) }; refreshInteraction() } }
     var onTouchingObject: ((Bool) -> Void)?
+    /// The eraser is in use: tape lets touches through so it can be rubbed out.
+    var erasing = false { didSet { if erasing != oldValue { refreshInteraction() } } }
 
     private(set) var views: [UUID: ElementView] = [:]
     private(set) weak var selected: ElementView?
@@ -111,7 +113,7 @@ final class ElementsLayer: UIView {
 
     private func refreshInteraction() {
         // Tape can always be tapped to peek; other objects only while editing.
-        isUserInteractionEnabled = editing || overInk
+        isUserInteractionEnabled = editing || (overInk && !erasing)
         for v in views.values { v.refreshChrome() }
     }
 
@@ -139,6 +141,22 @@ final class ElementsLayer: UIView {
             if let hit = ev.hitTest(p, with: event) { return hit }
         }
         return nil
+    }
+
+    /// The eraser passed over these points (layer coordinates): rub out any tape it touched.
+    @discardableResult
+    func eraseTape(at pts: [CGPoint], radius: CGFloat) -> Bool {
+        var hit: [UUID] = []
+        for (id, v) in views where v.element.kind == .tape {
+            let local = pts.map { convert($0, to: v) }
+            if v.tapeTouched(by: local, radius: radius) { hit.append(id) }
+        }
+        guard !hit.isEmpty else { return false }
+        for id in hit { views[id]?.fadeAway() }
+        model.items.removeAll { hit.contains($0.id) }
+        model.save()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.reload() }
+        return true
     }
 
     /// New text box (or sticky) at a page-unit point, ready to type.
@@ -312,9 +330,28 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
 
     func refreshChrome() {
         let editing = layerOwner.editing
-        isUserInteractionEnabled = editing || element.kind == .tape
+        isUserInteractionEnabled = editing || (element.kind == .tape && !layerOwner.erasing)
         border.isHidden = !(editing && isSelected)
         handle.isHidden = !(editing && isSelected)
+    }
+
+    /// Does the eraser (a circle of `radius` at each point) touch this tape band?
+    func tapeTouched(by pts: [CGPoint], radius: CGFloat) -> Bool {
+        guard element.kind == .tape else { return false }
+        guard let path = tapeShape.path else {
+            return pts.contains { bounds.insetBy(dx: -radius, dy: -radius).contains($0) }
+        }
+        let band = path.copy(strokingWithWidth: tapeShape.lineWidth + radius * 2, lineCap: .round,
+                             lineJoin: .round, miterLimit: 1)
+        return pts.contains { band.contains(convert($0, to: tapeView)) }
+    }
+
+    /// Shrinks and fades out (the eraser rubbing tape away).
+    func fadeAway() {
+        UIView.animate(withDuration: 0.18, animations: {
+            self.alpha = 0
+            self.transform = CGAffineTransform(scaleX: 0.96, y: 0.96)
+        })
     }
 
     /// Freehand tape only answers touches on the band itself, not the empty box around it,

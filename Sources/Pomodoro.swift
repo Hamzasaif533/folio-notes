@@ -37,9 +37,13 @@ final class Pomodoro: ObservableObject {
     /// Set for a moment when a phase ends, so the editor can say so.
     @Published var finished: Phase?
 
-    @Published var focusMinutes: Int = 25 { didSet { durationsChanged() } }
-    @Published var shortMinutes: Int = 5 { didSet { durationsChanged() } }
-    @Published var longMinutes: Int = 15 { didSet { durationsChanged() } }
+    /// Lengths in seconds (typed as minutes and seconds).
+    @Published var focusSeconds: Int = 25 * 60 { didSet { durationsChanged() } }
+    @Published var shortSeconds: Int = 5 * 60 { didSet { durationsChanged() } }
+    @Published var longSeconds: Int = 15 * 60 { didSet { durationsChanged() } }
+    /// Goes up each time a phase ends, so the screen edges can flash.
+    @Published private(set) var flashCount = 0
+    @Published private(set) var flashColor: Color = Phase.focus.color
 
     private var timer: Timer?
     private var loading = true
@@ -52,9 +56,9 @@ final class Pomodoro: ObservableObject {
 
     func duration(of p: Phase) -> TimeInterval {
         switch p {
-        case .focus: return TimeInterval(focusMinutes * 60)
-        case .shortBreak: return TimeInterval(shortMinutes * 60)
-        case .longBreak: return TimeInterval(longMinutes * 60)
+        case .focus: return TimeInterval(max(focusSeconds, 5))
+        case .shortBreak: return TimeInterval(max(shortSeconds, 5))
+        case .longBreak: return TimeInterval(max(longSeconds, 5))
         }
     }
 
@@ -77,10 +81,10 @@ final class Pomodoro: ObservableObject {
         if let d = defaults.dictionary(forKey: Self.key) {
             phase = Phase(rawValue: d["phase"] as? String ?? "") ?? .focus
             sessions = d["sessions"] as? Int ?? 0
-            focusMinutes = d["focus"] as? Int ?? 25
-            shortMinutes = d["short"] as? Int ?? 5
-            longMinutes = d["long"] as? Int ?? 15
-            remaining = d["remaining"] as? Double ?? TimeInterval(focusMinutes * 60)
+            focusSeconds = d["focusS"] as? Int ?? (d["focus"] as? Int ?? 25) * 60
+            shortSeconds = d["shortS"] as? Int ?? (d["short"] as? Int ?? 5) * 60
+            longSeconds = d["longS"] as? Int ?? (d["long"] as? Int ?? 15) * 60
+            remaining = d["remaining"] as? Double ?? TimeInterval(focusSeconds)
             if let end = d["end"] as? Double { endDate = Date(timeIntervalSince1970: end) }
         }
         loading = false
@@ -172,6 +176,8 @@ final class Pomodoro: ObservableObject {
         remaining = duration(of: phase)
         if counted && wasRunning {
             finished = ended
+            flashColor = ended.color
+            flashCount += 1
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             AudioServicesPlaySystemSound(1005)
         }
@@ -209,7 +215,7 @@ final class Pomodoro: ObservableObject {
     private func save() {
         guard !loading else { return }
         var d: [String: Any] = ["phase": phase.rawValue, "sessions": sessions, "remaining": remaining,
-                                "focus": focusMinutes, "short": shortMinutes, "long": longMinutes]
+                                "focusS": focusSeconds, "shortS": shortSeconds, "longS": longSeconds]
         if let endDate { d["end"] = endDate.timeIntervalSince1970 }
         defaults.set(d, forKey: Self.key)
     }
@@ -221,8 +227,15 @@ struct PomodoroPanel: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Text("Pomodoro Timer")
-                .font(.system(size: 19, weight: .semibold))
+            HStack {
+                Text("Pomodoro Timer")
+                    .font(.system(size: 19, weight: .semibold))
+                Spacer()
+                if focused != nil {
+                    Button("Done") { focused = nil }
+                        .font(.body.weight(.semibold))
+                }
+            }
 
             Picker("Phase", selection: Binding(get: { timer.phase }, set: { timer.select($0) })) {
                 ForEach(Pomodoro.Phase.allCases) { Text($0.title).tag($0) }
@@ -274,11 +287,11 @@ struct PomodoroPanel: View {
             }
 
             VStack(spacing: 0) {
-                minutes("Focus", $timer.focusMinutes, 5...90, step: 5)
+                length("Focus", $timer.focusSeconds)
                 Divider().padding(.leading, 14)
-                minutes("Short Break", $timer.shortMinutes, 1...30, step: 1)
+                length("Short Break", $timer.shortSeconds)
                 Divider().padding(.leading, 14)
-                minutes("Long Break", $timer.longMinutes, 5...45, step: 5)
+                length("Long Break", $timer.longSeconds)
             }
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(hex: "#1C1C1E")))
 
@@ -309,18 +322,81 @@ struct PomodoroPanel: View {
         .accessibilityLabel(label)
     }
 
-    private func minutes(_ title: String, _ value: Binding<Int>, _ range: ClosedRange<Int>, step: Int) -> some View {
-        Stepper(value: value, in: range, step: step) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text("\(value.wrappedValue) min")
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.6))
+    /// A length you type as minutes and seconds.
+    private func length(_ title: String, _ total: Binding<Int>) -> some View {
+        let mins = Binding<Int>(get: { total.wrappedValue / 60 },
+                                set: { total.wrappedValue = Self.clampTotal(min(max($0, 0), 600) * 60 + total.wrappedValue % 60) })
+        let secs = Binding<Int>(get: { total.wrappedValue % 60 },
+                                set: { total.wrappedValue = Self.clampTotal(total.wrappedValue / 60 * 60 + min(max($0, 0), 59)) })
+        return HStack(spacing: 6) {
+            Text(title)
+            Spacer()
+            numberField(mins, focus: .init(title: title, part: 0))
+            Text("min").foregroundStyle(.white.opacity(0.55))
+            numberField(secs, focus: .init(title: title, part: 1))
+            Text("sec").foregroundStyle(.white.opacity(0.55))
+        }
+        .font(.body)
+        .padding(.horizontal, 14)
+        .frame(height: 50)
+    }
+
+    private static func clampTotal(_ s: Int) -> Int { max(s, 0) }
+
+    struct FieldID: Hashable { let title: String; let part: Int }
+    @FocusState private var focused: FieldID?
+
+    private func numberField(_ value: Binding<Int>, focus: FieldID) -> some View {
+        // Typed digits apply straight away (the number pad has no return key).
+        let text = Binding<String>(get: { String(value.wrappedValue) },
+                                   set: { value.wrappedValue = Int(String($0.filter { $0.isNumber }.prefix(3))) ?? 0 })
+        return TextField("0", text: text)
+            .keyboardType(.numberPad)
+            .multilineTextAlignment(.center)
+            .monospacedDigit()
+            .focused($focused, equals: focus)
+            .frame(width: 48, height: 34)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(focused == focus ? 0.16 : 0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(focused == focus ? timer.phase.color : Color.clear, lineWidth: 1.5))
+    }
+}
+
+/// When a Pomodoro phase ends, the edges of the screen glow and pulse a few times.
+struct PomodoroEdgeFlash: View {
+    @ObservedObject var timer: Pomodoro
+    @State private var glow = false
+    @State private var visible = false
+
+    var body: some View {
+        ZStack {
+            if visible {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(timer.flashColor, lineWidth: 10)
+                    .blur(radius: 6)
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(timer.flashColor.opacity(0.9), lineWidth: 4))
+                    .opacity(glow ? 1 : 0.15)
+                    .transition(.opacity)
             }
         }
-        .padding(.horizontal, 14)
-        .frame(height: 46)
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .onChange(of: timer.flashCount) { _, _ in pulse() }
+    }
+
+    private func pulse() {
+        Task { @MainActor in
+            withAnimation(.easeOut(duration: 0.15)) { visible = true }
+            for _ in 0..<4 {
+                withAnimation(.easeInOut(duration: 0.35)) { glow = true }
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                withAnimation(.easeInOut(duration: 0.35)) { glow = false }
+                try? await Task.sleep(nanoseconds: 450_000_000)
+            }
+            withAnimation(.easeOut(duration: 0.4)) { visible = false }
+        }
     }
 }
 

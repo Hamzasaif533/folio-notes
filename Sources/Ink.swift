@@ -243,7 +243,10 @@ struct InkPen: Equatable {
         let k = CGFloat(feel.pressure)
         var w: CGFloat
         switch style {
-        case .fountain: w = width * max(1 - 1.2 * k + 2.1 * k * p, 0.12)
+        case .fountain:
+            // Eased pressure (soft at first, then full) like a real nib flexing.
+            let pe = sin(min(max(p, 0), 1) * .pi / 2)
+            w = width * max(1 - 0.7 * k + 1.25 * k * pe, 0.2)
         case .brush: w = width * max(1 - 1.5 * k + 2.6 * k * p, 0.06)
         default: w = width * max(1 - 0.56 * k + 1.12 * k * p, 0.12)
         }

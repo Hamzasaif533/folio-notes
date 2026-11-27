@@ -336,19 +336,9 @@ struct MoreMenu: View {
                             }
                         }
                     }
-                    settingRow(icon: "applepencil", title: "Stylus") {
+                    settingRow(icon: "applepencil", title: "Stylus", divider: false) {
                         Picker("Stylus", selection: $inputMode) {
                             ForEach(DrawingInput.allCases) { m in Text(m.title).tag(m) }
-                        }
-                    }
-                    settingRow(icon: "rectangle.3.group", title: "Tools Bar") {
-                        Picker("Tools Bar", selection: $toolsDock) {
-                            ForEach(ToolbarDock.allCases) { d in Text(d.title).tag(d) }
-                        }
-                    }
-                    settingRow(icon: "paintpalette", title: "Colour Bar", divider: false) {
-                        Picker("Colour Bar", selection: $colorsDock) {
-                            ForEach(ToolbarDock.allCases) { d in Text(d.title).tag(d) }
                         }
                     }
                 }

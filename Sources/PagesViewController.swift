@@ -210,6 +210,7 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
         for l in [pv.under, pv.over] {
             l.onTouchingObject = { [weak self] active in self?.objectTouch(active) }
             l.editing = editorTool == .text && !readOnly
+            l.erasing = editorTool == .eraser && !readOnly
         }
         pv.ink.isUserInteractionEnabled = canvasEnabled
         contentView.addSubview(pv)

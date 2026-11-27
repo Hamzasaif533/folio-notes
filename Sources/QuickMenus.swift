@@ -429,31 +429,42 @@ struct PageSidebar: View {
 
     @ViewBuilder
     private func thumb(_ i: Int, slot: Int) -> some View {
-        let base = PageThumb(index: slot, template: template, paper: paper,
-                             selected: selecting ? picked.contains(i) : i == current, image: thumbnail(i),
+        let isPicked = picked.contains(i)
+        let base = PageThumb(index: canReorder ? slot : i, template: template, paper: paper,
+                             selected: !selecting && i == current, image: thumbnail(i),
                              bookmarked: bookmarked(i), caption: outlineTitle(i),
                              onBookmark: { onToggleBookmark(i) },
                              menu: { pageMenu(i) })
-            .overlay(alignment: .bottomLeading) {
+            .scaleEffect(selecting && isPicked ? 0.93 : 1)
+            .overlay {
                 if selecting {
-                    Image(systemName: picked.contains(i) ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(picked.contains(i) ? Theme.action : Color.gray.opacity(0.7))
-                        .background(Circle().fill(Color.white).padding(2))
-                        .padding(.leading, 6)
-                        .padding(.bottom, 30)
-                        .transition(.scale.combined(with: .opacity))
+                    // While selecting, the whole thumbnail (bookmark and ⋯ included) just picks the page.
+                    ZStack(alignment: .topLeading) {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isPicked ? Self.pickTint.opacity(0.22) : Color.black.opacity(0.001))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(isPicked ? Self.pickTint : Color.white.opacity(0.25),
+                                              lineWidth: isPicked ? 3 : 1))
+                        Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 26, weight: .semibold))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, isPicked ? Self.pickTint : Color.black.opacity(0.35))
+                            .background(Circle().fill(isPicked ? Color.white : Color.black.opacity(0.25)).padding(3))
+                            .padding(6)
+                            .scaleEffect(isPicked ? 1.08 : 1)
+                    }
+                    .padding(-4)
+                    .contentShape(Rectangle())
+                    .onTapGesture { togglePick(i) }
+                    .transition(.opacity)
                 }
             }
+            .animation(.snappy(duration: 0.18), value: isPicked)
             .opacity(dragging == i ? 0.35 : 1)
             .id(i)
             .onTapGesture {
                 if dragging != nil { dragging = nil; order = Array(0..<count) }
-                if selecting {
-                    if picked.contains(i) { picked.remove(i) } else { picked.insert(i) }
-                } else {
-                    onSelect(i)
-                }
+                if selecting { togglePick(i) } else { onSelect(i) }
             }
         if canReorder {
             base
@@ -471,6 +482,14 @@ struct PageSidebar: View {
         } else {
             base.contextMenu { pageMenu(i) }
         }
+    }
+
+    /// Selection colour, bright on the dark sidebar whatever the theme.
+    private static let pickTint = Color(hex: "#0A84FF")
+
+    private func togglePick(_ i: Int) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        if picked.contains(i) { picked.remove(i) } else { picked.insert(i) }
     }
 
     /// The pages already shuffled while dragging; now move the page for real.

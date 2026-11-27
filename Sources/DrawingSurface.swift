@@ -38,6 +38,12 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     private lazy var redoTap = UITapGestureRecognizer(target: self, action: #selector(fingerRedo))
     private lazy var splitTap = UITapGestureRecognizer(target: self, action: #selector(fiveFingerTap))
     var onFiveFingerTap: (() -> Void)?
+    private lazy var focusTap = UITapGestureRecognizer(target: self, action: #selector(fourFingerTap))
+    var onFourFingerTap: (() -> Void)?
+    /// The eraser was lifted off the page.
+    var onEraseFinished: (() -> Void)?
+    /// A drawn circle was tapped and became a lasso selection.
+    var onSwitchToLasso: (() -> Void)?
     /// Pinch-zoom switched off from the zoom menu.
     var zoomLocked = false { didSet { updateFingerScrolling() } }
     private var pencilNearby = false
@@ -85,7 +91,7 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         view.addGestureRecognizer(textTap)
 
         // Two-finger tap undoes, three-finger tap redoes (fingers only).
-        for (g, n) in [(undoTap, 2), (redoTap, 3), (splitTap, 5)] {
+        for (g, n) in [(undoTap, 2), (redoTap, 3), (focusTap, 4), (splitTap, 5)] {
             g.numberOfTouchesRequired = n
             g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
             g.cancelsTouchesInView = false
@@ -93,6 +99,9 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
             view.addGestureRecognizer(g)
         }
         undoTap.require(toFail: redoTap)
+        undoTap.require(toFail: focusTap)
+        redoTap.require(toFail: focusTap)
+        focusTap.require(toFail: splitTap)
 
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(undoStateChanged), name: .NSUndoManagerDidCloseUndoGroup, object: undo)
@@ -172,7 +181,10 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         laserPress.isEnabled = t == .laser && !readOnly
         tapePress.isEnabled = t == .tape && !readOnly
         textTap.isEnabled = t == .text && !readOnly
-        for l in allObjectLayers { l.editing = t == .text && !readOnly }
+        for l in allObjectLayers {
+            l.editing = t == .text && !readOnly
+            l.erasing = t == .eraser && !readOnly
+        }
         updateTouchTypes()
         updateScrollTouches()
     }
@@ -308,9 +320,21 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         }
         ink.onObjectTouch = { [weak self] active in self?.objectTouch(active) }
         ink.onSelectionChanged = { [weak self] canvas in self?.selectionChanged(canvas) }
+        ink.onErase = { [weak self] canvas, pts, r in self?.eraseTape(on: canvas, at: pts, radius: r) }
+        ink.onEraseEnded = { [weak self] in self?.onEraseFinished?() }
+        ink.onSwitchToLasso = { [weak self] in self?.onSwitchToLasso?() }
         ink.rulerSnap = { [weak self] canvas, p in self?.rulerProjection(canvas, start: p) }
         ink.tool = tool
         ink.fingerDraws = fingerDraws
+    }
+
+    /// The eraser also rubs out tape lying over the ink.
+    private func eraseTape(on canvas: InkCanvasView, at pts: [CGPoint], radius r: CGFloat) {
+        guard let first = pts.first else { return }
+        guard let over = objectLayers(at: canvas.convert(first, to: view))?.over else { return }
+        let a = canvas.convert(first, to: over)
+        let b = canvas.convert(CGPoint(x: first.x + r, y: first.y), to: over)
+        over.eraseTape(at: pts.map { canvas.convert($0, to: over) }, radius: hypot(b.x - a.x, b.y - a.y))
     }
 
     /// The ink on `canvas` changed to `drawing`. Subclasses save it (and keep a zoom box and its
@@ -591,6 +615,7 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     func performRedo() { if undo.canRedo { undo.redo() } }
 
     @objc private func fiveFingerTap() { onFiveFingerTap?() }
+    @objc private func fourFingerTap() { onFourFingerTap?() }
 
     @objc private func fingerUndo() {
         guard !readOnly, undo.canUndo else { return }

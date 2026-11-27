@@ -52,8 +52,9 @@ struct SplitEditorView: View {
 
     @AppStorage("folio.splitSideBySide") private var sideBySide = true
     @AppStorage("folio.splitFraction") private var fraction = 0.5
-    /// How far the handle has been dragged; the sides only resize when it's let go.
-    @State private var dragOffset: CGFloat?
+    /// While the handle is dragged: where it started, and the live split (saved when let go).
+    @State private var dragStart: Double?
+    @State private var liveFraction: Double?
 
     private static let divider: CGFloat = 4
 
@@ -61,8 +62,8 @@ struct SplitEditorView: View {
         GeometryReader { geo in
             let total = sideBySide ? geo.size.width : geo.size.height
             let usable = max(total - Self.divider, 1)
-            let firstLength = max(0, usable * CGFloat(fraction))
-            let pos = min(max(firstLength + (dragOffset ?? 0), usable * 0.2), usable * 0.8)
+            let firstLength = max(0, usable * CGFloat(liveFraction ?? fraction))
+            let pos = firstLength
             let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
             ZStack(alignment: .topLeading) {
                 layout {
@@ -76,23 +77,13 @@ struct SplitEditorView: View {
                 }
                 .animation(.easeOut(duration: 0.25), value: sideBySide)
 
-                // While dragging: a line showing where the split will land.
-                if dragOffset != nil {
-                    Rectangle()
-                        .fill(Theme.action)
-                        .frame(width: sideBySide ? Self.divider : geo.size.width,
-                               height: sideBySide ? geo.size.height : Self.divider)
-                        .shadow(color: .black.opacity(0.35), radius: 4)
-                        .offset(x: sideBySide ? pos : 0, y: sideBySide ? 0 : pos)
-                        .allowsHitTesting(false)
-                }
-
                 handle(firstLength: firstLength, usable: usable)
                     .position(x: sideBySide ? pos + Self.divider / 2 : geo.size.width / 2,
                               y: sideBySide ? geo.size.height / 2 : pos + Self.divider / 2)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
+        .overlay(PomodoroEdgeFlash(timer: Pomodoro.shared))
         .background(Color.black.ignoresSafeArea())
         .ignoresSafeArea()
     }
@@ -107,7 +98,7 @@ struct SplitEditorView: View {
 
     /// The grip in the middle of the divider: drag it to resize, hold it for the options.
     private func handle(firstLength: CGFloat, usable: CGFloat) -> some View {
-        let dragging = dragOffset != nil
+        let dragging = dragStart != nil
         return Capsule()
             .fill(dragging ? Theme.action : Color(hex: "#3A3A3C"))
             .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
@@ -125,17 +116,20 @@ struct SplitEditorView: View {
             .gesture(
                 DragGesture(minimumDistance: 3, coordinateSpace: .global)
                     .onChanged { v in
-                        dragOffset = sideBySide ? v.translation.width : v.translation.height
-                    }
-                    .onEnded { v in
+                        // The notebooks resize live as you drag (in small steps, so it stays smooth).
+                        if dragStart == nil { dragStart = liveFraction ?? fraction }
                         let delta = sideBySide ? v.translation.width : v.translation.height
-                        let f = Double((firstLength + delta) / usable)
+                        var f = (dragStart ?? 0.5) + Double(delta / usable)
+                        f = (min(max(f, 0.2), 0.8) * 250).rounded() / 250
+                        guard f != liveFraction else { return }
                         var t = Transaction()
                         t.disablesAnimations = true
-                        withTransaction(t) {
-                            fraction = min(max(f, 0.2), 0.8)
-                            dragOffset = nil
-                        }
+                        withTransaction(t) { liveFraction = f }
+                    }
+                    .onEnded { _ in
+                        if let f = liveFraction { fraction = f }
+                        dragStart = nil
+                        liveFraction = nil
                     }
             )
             .contextMenu {

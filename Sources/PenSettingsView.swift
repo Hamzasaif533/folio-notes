@@ -346,6 +346,8 @@ struct PenSettingsView: View {
     @EnvironmentObject var tools: ToolState
     /// Shown inside the pen picker (which already has the title, preview and pen types).
     var embedded = false
+    @AppStorage("folio.scribbleErase") private var scribbleErase = true
+    @AppStorage("folio.circleLasso") private var circleLasso = true
 
     private var sizePresets: [CGFloat] {
         let r = tools.pen.kind.widthRange
@@ -403,6 +405,24 @@ struct PenSettingsView: View {
 
                 label("Color")
                 ColorPalettePicker(hex: $tools.pen.colorHex)
+
+                Divider()
+
+                label("Pen Gestures")
+                Toggle(isOn: $scribbleErase) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Scribble to Erase").font(.subheadline)
+                        Text("Scribble back and forth over writing to rub it out.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $circleLasso) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Circle to Select").font(.subheadline)
+                        Text("Draw a circle around something, then tap inside it to lasso it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
 
                 Divider()
 
@@ -559,6 +579,13 @@ struct EraserSettingsView: View {
             } else {
                 Text("Touching a stroke erases the whole stroke.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Toggle(isOn: $tools.eraserReturns) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Switch Back After Erasing").font(.subheadline.weight(.semibold))
+                    Text("Lift the Pencil and you're back on the tool you had before.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Label("Double-tap Apple Pencil to switch between the eraser and your pen.", systemImage: "applepencil.tip")
                 .font(.caption)

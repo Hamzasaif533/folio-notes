@@ -21,6 +21,9 @@ final class EditorController: ObservableObject {
     @Published var doubleTaps = 0
     @Published var zoomLocked = false
     @Published var fiveTaps = 0
+    @Published var fourTaps = 0
+    @Published var eraseEnds = 0
+    @Published var lassoSwitches = 0
     /// Short messages from the page (e.g. "Undo" after a two-finger tap).
     @Published var messageCount = 0
     var lastMessage = ""
@@ -83,6 +86,9 @@ struct SurfaceHost: UIViewControllerRepresentable {
         }
         vc.onPencilDoubleTap = { DispatchQueue.main.async { ctrl.doubleTaps += 1 } }
         vc.onFiveFingerTap = { DispatchQueue.main.async { ctrl.fiveTaps += 1 } }
+        vc.onFourFingerTap = { DispatchQueue.main.async { ctrl.fourTaps += 1 } }
+        vc.onEraseFinished = { DispatchQueue.main.async { ctrl.eraseEnds += 1 } }
+        vc.onSwitchToLasso = { DispatchQueue.main.async { ctrl.lassoSwitches += 1 } }
         vc.onMessage = { m in
             DispatchQueue.main.async {
                 ctrl.lastMessage = m
@@ -248,8 +254,9 @@ struct EditorView: View {
     @State private var showPomodoroFromPill = false
     @Namespace private var toolNS
 
-    private var toolsDock: ToolbarDock { BarPlace(toolsPlaceRaw).map(Self.edge) ?? ToolbarDock(rawValue: dockRaw) ?? .top }
-    private var colorsDock: ToolbarDock { BarPlace(colorsPlaceRaw).map(Self.edge) ?? ToolbarDock(rawValue: colorDockRaw) ?? .top }
+    /// Both bars stay fixed along the top edge.
+    private var toolsDock: ToolbarDock { .top }
+    private var colorsDock: ToolbarDock { .top }
 
     /// The screen edge a freely placed bar is closest to.
     private static func edge(_ p: BarPlace) -> ToolbarDock {
@@ -440,6 +447,12 @@ struct EditorView: View {
         .onChange(of: controller.pageIndex) { _, _ in flashPageBadge() }
         .onChange(of: controller.messageCount) { _, _ in showToast(controller.lastMessage) }
         .onChange(of: controller.fiveTaps) { _, _ in startSplit() }
+        .onChange(of: controller.fourTaps) { _, _ in
+            focusMode.toggle()
+            showToast(focusMode ? "Focus mode" : "Focus mode off")
+        }
+        .onChange(of: controller.eraseEnds) { _, _ in tools.leaveEraser() }
+        .onChange(of: controller.lassoSwitches) { _, _ in tools.tool = .lasso }
         .sheet(isPresented: $showSplitPicker) {
             SplitPicker(current: notebook.id) { other in
                 showSplitPicker = false
@@ -530,6 +543,8 @@ struct EditorView: View {
                 .padding(.trailing, 14)
                 .padding(.bottom, (toolsDock == .bottom || colorsDock == .bottom) ? 76 : 14)
             }
+            // Split screen flashes both sides from its own view.
+            if !inSplit { PomodoroEdgeFlash(timer: Pomodoro.shared) }
 
             if showPageBadge && !isCanvas {
                 pageBadge
@@ -548,7 +563,7 @@ struct EditorView: View {
 
     private func dock(of bar: BarKind) -> ToolbarDock { bar == .tools ? toolsDock : colorsDock }
 
-    private func place(of bar: BarKind) -> BarPlace? { BarPlace(bar == .tools ? toolsPlaceRaw : colorsPlaceRaw) }
+    private func place(of bar: BarKind) -> BarPlace? { nil }
 
     private func isVertical(_ bar: BarKind) -> Bool { place(of: bar)?.vertical ?? dock(of: bar).vertical }
 
@@ -600,7 +615,6 @@ struct EditorView: View {
         .scaleEffect(lifted ? 1.06 : 1)
         .shadow(color: .black.opacity(lifted ? 0.2 : 0), radius: 16, x: 0, y: 8)
         .position(x: c.x + (lifted ? dragOffset.width : 0), y: c.y + (lifted ? dragOffset.height : 0))
-        .simultaneousGesture(moveGesture(bar, size: size))
     }
 
     /// Where a dropped bar lands: snapped flat against the nearest screen edge, upright on the
