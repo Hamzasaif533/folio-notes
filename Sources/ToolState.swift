@@ -343,6 +343,7 @@ final class ToolState: ObservableObject {
     private var loading = true
 
     init() {
+        var resetFountain = false
         if let data = UserDefaults.standard.data(forKey: Self.key),
            let s = try? JSONDecoder().decode(Saved.self, from: data) {
             pen = s.pen
@@ -365,10 +366,7 @@ final class ToolState: ObservableObject {
             tapeQuickSizes = Self.three(s.tapeQuickSizes, Self.defaultTapeSizes)
             penFeels = s.penFeels ?? [:]
             eraserReturns = s.eraserReturns ?? true
-            if s.fountainV2 == nil {
-                penFeels["fountain"] = nil
-                if pen.kind == .fountain || pen.kind == .brush { pen.feel = nil }
-            }
+            resetFountain = s.fountainV2 == nil
             toolbarItems = s.toolbarItems.map { $0.compactMap(ToolbarItemKind.init(rawValue:)) } ?? ToolbarItemKind.defaults
         } else {
             textColorHex = "#1C1C1E"
@@ -396,6 +394,10 @@ final class ToolState: ObservableObject {
             ]
             recentColors = []
             inputMode = .pencilOnly
+        }
+        if resetFountain {
+            penFeels["fountain"] = nil
+            if pen.kind == .fountain || pen.kind == .brush { pen.feel = nil }
         }
         if !InkKind.penKinds.contains(pen.kind) { pen.kind = pen.kind == .brush ? .fountain : .ballpoint }
         loading = false
