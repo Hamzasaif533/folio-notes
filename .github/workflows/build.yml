@@ -7,9 +7,9 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -20,7 +20,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build (unsigned)
+      - name: Build for iPad (unsigned)
         run: |
           set -o pipefail
           xcodebuild \
@@ -33,12 +33,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build | tee xcodebuild.log | grep -E "error:|warning: .*Swift|BUILD (SUCCEEDED|FAILED)" || true
+            build > xcodebuild.log 2>&1 || true
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild.log | head -n 80
           test -d build/Build/Products/Release-iphoneos/Folio.app
-
-      - name: Show compile errors
-        if: failure()
-        run: grep -E "error:" xcodebuild.log | head -n 80 || true
 
       - name: Package IPA
         run: |
@@ -46,8 +43,35 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Folio.app Payload/
           zip -qry Folio.ipa Payload
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Folio-ipa
           path: Folio.ipa
           retention-days: 30
+
+      - name: Build for simulator
+        continue-on-error: true
+        run: |
+          xcodebuild \
+            -project Folio.xcodeproj \
+            -scheme Folio \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-sim \
+            CODE_SIGN_IDENTITY="-" \
+            build > xcodebuild-sim.log 2>&1 || true
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild-sim.log | head -n 40
+
+      - name: Take simulator screenshots
+        continue-on-error: true
+        timeout-minutes: 15
+        run: bash scripts/screenshots.sh
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: screenshots
+          path: shots
+          if-no-files-found: ignore
+          retention-days: 14

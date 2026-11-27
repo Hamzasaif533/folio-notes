@@ -35,10 +35,19 @@ extension Color {
 }
 
 enum Theme {
-    static let accent = Color(hex: "#E8613C")
-    static let shelfBackground = Color(hex: "#F3F0EA")
-    static let toolbarBackground = Color(hex: "#FBFAF7")
-    static let deskBackground = UIColor(hex: "#E6E2DB")
+    static func dynamic(light: String, dark: String) -> UIColor {
+        UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: dark) : UIColor(hex: light) }
+    }
+
+    /// Coral: selected sidebar tiles.
+    static let accent = Color(hex: "#E8714F")
+    /// Cyan: primary actions and the selected tool.
+    static let action = Color(hex: "#18AFC9")
+    static let libraryBackground = Color(uiColor: dynamic(light: "#F7F7F9", dark: "#000000"))
+    static let sidebarPanel = Color(uiColor: dynamic(light: "#EDEDF0", dark: "#1C1C1E"))
+    static let tileFill = Color(uiColor: dynamic(light: "#FFFFFF", dark: "#2C2C2E"))
+    static let shelfBackground = libraryBackground
+    static let deskBackground = dynamic(light: "#E3E3E8", dark: "#111113")
 
     static let folderColors: [String] = [
         "#5B8DEF", "#E8613C", "#3FB68B", "#F2B33D",
@@ -52,11 +61,14 @@ enum Theme {
         "calendar", "house.fill", "leaf.fill", "camera.fill"
     ]
 
-    static let coverPalettes: [(String, String)] = [
-        ("#2E3A59", "#1B2236"), ("#C0392B", "#8E2A20"), ("#2D6A4F", "#1B4332"),
-        ("#E9A23B", "#C97C1A"), ("#6C5B7B", "#4A3B58"), ("#F4A6A6", "#E07A7A"),
-        ("#3A7CA5", "#255A7C"), ("#D8CFC4", "#B8AC9E"), ("#2B2B2B", "#0E0E0E"),
-        ("#88B04B", "#5E8A2E"), ("#F7CAC9", "#92A8D1"), ("#FF9A8B", "#FF6A88")
+    /// (top colour, bottom colour, spine colour)
+    static let coverPalettes: [(String, String, String)] = [
+        ("#FFD43B", "#FFC300", "#F0476B"), ("#2E3A59", "#1B2236", "#E9A23B"),
+        ("#C0392B", "#8E2A20", "#2B2B2B"), ("#2D6A4F", "#1B4332", "#D8CFC4"),
+        ("#6C5B7B", "#4A3B58", "#F4A6A6"), ("#F4A6A6", "#E07A7A", "#6C5B7B"),
+        ("#3A7CA5", "#255A7C", "#FFD43B"), ("#D8CFC4", "#B8AC9E", "#8E2A20"),
+        ("#2B2B2B", "#0E0E0E", "#E8714F"), ("#88B04B", "#5E8A2E", "#F7E14A"),
+        ("#F7CAC9", "#92A8D1", "#FFFFFF"), ("#FF9A8B", "#FF6A88", "#2E3A59")
     ]
 
     static let penColors: [String] = [

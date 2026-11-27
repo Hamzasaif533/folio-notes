@@ -75,6 +75,12 @@ struct Notebook: Identifiable, Codable, Hashable {
     var pages: [UUID]
     var createdAt: Date = Date()
     var modifiedAt: Date = Date()
+    // Optional so libraries saved by version 1.0 still load.
+    var starred: Bool? = nil
+    var trashedAt: Date? = nil
+
+    var isStarred: Bool { starred ?? false }
+    var isTrashed: Bool { trashedAt != nil }
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {

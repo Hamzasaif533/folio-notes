@@ -109,8 +109,10 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
     var onPageChanged: ((Int, Int) -> Void)?
     var onUndoChanged: ((Bool, Bool) -> Void)?
 
-    static let marginUnits: CGFloat = 24
-    static let gapUnits: CGFloat = 28
+    /// Pages fill the screen width edge to edge, with a small gap between them.
+    static let marginUnits: CGFloat = 0
+    static let gapUnits: CGFloat = 14
+    private var rulerOn = false
     private var minZoom: CGFloat { fitZoom * 0.5 }
     private var maxZoom: CGFloat { fitZoom * 4 }
 
@@ -160,6 +162,7 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         pv.canvas.delegate = self
         pv.canvas.tool = tool
         pv.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
+        pv.canvas.isRulerActive = rulerOn
         contentView.addSubview(pv)
         return pv
     }
@@ -190,12 +193,12 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         let g = Self.gapUnits * z
         let pw = ps.width * z
         let ph = ps.height * z
-        let size = CGSize(width: pw + 2 * m, height: CGFloat(pageViews.count) * (ph + g) + g)
+        let size = CGSize(width: pw + 2 * m, height: max(ph, CGFloat(pageViews.count) * (ph + g) - g))
 
         contentView.transform = .identity
         contentView.frame = CGRect(origin: .zero, size: size)
         for (i, pv) in pageViews.enumerated() {
-            pv.frame = CGRect(x: m, y: g + CGFloat(i) * (ph + g), width: pw, height: ph)
+            pv.frame = CGRect(x: m, y: CGFloat(i) * (ph + g), width: pw, height: ph)
             pv.apply(zoom: z)
         }
         scrollView.contentSize = size
@@ -248,7 +251,7 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         let z = docZoom * scrollView.zoomScale
         let unitH = TemplateRenderer.pageSize.height + Self.gapUnits
         let centerY = (scrollView.contentOffset.y + scrollView.bounds.height / 2) / z
-        let idx = min(max(Int((centerY - Self.gapUnits / 2) / unitH), 0), pageViews.count - 1)
+        let idx = min(max(Int(centerY / unitH), 0), pageViews.count - 1)
         if force || idx != currentPage {
             currentPage = idx
             onPageChanged?(idx, pageViews.count)
@@ -257,8 +260,7 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
 
     func scrollTo(page: Int, animated: Bool) {
         guard pageViews.indices.contains(page) else { return }
-        let y = (Self.gapUnits + CGFloat(page) * (TemplateRenderer.pageSize.height + Self.gapUnits)) * docZoom
-            - Self.gapUnits * docZoom * 0.5
+        let y = CGFloat(page) * (TemplateRenderer.pageSize.height + Self.gapUnits) * docZoom
         scrollView.setContentOffset(clamped(CGPoint(x: scrollView.contentOffset.x, y: y)), animated: animated)
     }
 
@@ -267,6 +269,12 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
     func setTool(_ newTool: PKTool) {
         tool = newTool
         for pv in pageViews { pv.canvas.tool = newTool }
+    }
+
+    func setRuler(_ on: Bool) {
+        guard on != rulerOn else { return }
+        rulerOn = on
+        for pv in pageViews { pv.canvas.isRulerActive = on }
     }
 
     func setInputMode(_ mode: DrawingInput) {

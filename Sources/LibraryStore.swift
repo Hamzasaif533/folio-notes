@@ -29,6 +29,7 @@ final class LibraryStore: ObservableObject {
               let index = try? JSONDecoder().decode(Index.self, from: data) else { return }
         folders = index.folders
         notebooks = index.notebooks
+        purgeOldTrash()
     }
 
     private func persist() {
@@ -41,7 +42,49 @@ final class LibraryStore: ObservableObject {
     // MARK: Queries
 
     func notebooks(in folderId: UUID?, sort: SortOrder = .modified) -> [Notebook] {
-        sorted(notebooks.filter { $0.folderId == folderId }, by: sort)
+        sorted(notebooks.filter { $0.folderId == folderId && !$0.isTrashed }, by: sort)
+    }
+
+    var activeNotebooks: [Notebook] { notebooks.filter { !$0.isTrashed } }
+    var starredNotebooks: [Notebook] { activeNotebooks.filter { $0.isStarred } }
+    var unfiledNotebooks: [Notebook] { activeNotebooks.filter { $0.folderId == nil } }
+    var trashedNotebooks: [Notebook] { notebooks.filter { $0.isTrashed } }
+
+    // MARK: Star & trash
+
+    func setStarred(_ id: UUID, _ value: Bool) {
+        guard let i = notebooks.firstIndex(where: { $0.id == id }) else { return }
+        notebooks[i].starred = value
+        persist()
+    }
+
+    func moveToTrash(_ id: UUID) {
+        guard let i = notebooks.firstIndex(where: { $0.id == id }) else { return }
+        notebooks[i].trashedAt = Date()
+        persist()
+    }
+
+    func restore(_ id: UUID) {
+        guard let i = notebooks.firstIndex(where: { $0.id == id }) else { return }
+        notebooks[i].trashedAt = nil
+        if let f = notebooks[i].folderId, folder(f) == nil { notebooks[i].folderId = nil }
+        persist()
+    }
+
+    func emptyTrash() {
+        for nb in trashedNotebooks { removeNotebookFiles(nb.id) }
+        notebooks.removeAll { $0.isTrashed }
+        persist()
+    }
+
+    /// Notebooks stay in the trash for 30 days.
+    private func purgeOldTrash() {
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
+        let old = notebooks.filter { ($0.trashedAt ?? .distantFuture) < cutoff }
+        guard !old.isEmpty else { return }
+        for nb in old { removeNotebookFiles(nb.id) }
+        notebooks.removeAll { ($0.trashedAt ?? .distantFuture) < cutoff }
+        persist()
     }
 
     func sorted(_ list: [Notebook], by sort: SortOrder) -> [Notebook] {
@@ -72,11 +115,9 @@ final class LibraryStore: ObservableObject {
     }
 
     func deleteFolder(_ id: UUID, deleteNotebooks: Bool) {
-        if deleteNotebooks {
-            for nb in notebooks where nb.folderId == id { removeNotebookFiles(nb.id) }
-            notebooks.removeAll { $0.folderId == id }
-        } else {
-            for i in notebooks.indices where notebooks[i].folderId == id { notebooks[i].folderId = nil }
+        for i in notebooks.indices where notebooks[i].folderId == id {
+            notebooks[i].folderId = nil
+            if deleteNotebooks && notebooks[i].trashedAt == nil { notebooks[i].trashedAt = Date() }
         }
         folders.removeAll { $0.id == id }
         persist()

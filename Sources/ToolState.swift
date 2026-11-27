@@ -109,6 +109,18 @@ final class ToolState: ObservableObject {
     @Published var favorites: [PenPreset] { didSet { save() } }
     @Published var recentColors: [String] { didSet { save() } }
     @Published var inputMode: DrawingInput { didSet { save() } }
+    @Published var penQuickColors: [String] { didSet { save() } }
+    @Published var penQuickSizes: [CGFloat] { didSet { save() } }
+    @Published var highlighterQuickColors: [String] { didSet { save() } }
+    @Published var highlighterQuickSizes: [CGFloat] { didSet { save() } }
+    @Published var eraserQuickSizes: [CGFloat] { didSet { save() } }
+    @Published var rulerActive = false
+
+    static let defaultPenColors = ["#D32F2F", "#1F3BB3", "#2E6B1F"]
+    static let defaultPenSizes: [CGFloat] = [1.5, 3, 6]
+    static let defaultHighlighterColors = ["#F7E14A", "#A3D977", "#FF9EC4"]
+    static let defaultHighlighterSizes: [CGFloat] = [10, 18, 30]
+    static let defaultEraserSizes: [CGFloat] = [10, 25, 50]
 
     private struct Saved: Codable {
         var pen: PenPreset
@@ -118,6 +130,12 @@ final class ToolState: ObservableObject {
         var favorites: [PenPreset]
         var recentColors: [String]
         var inputMode: DrawingInput
+        // Added in 1.1 (optional so 1.0 settings still load).
+        var penQuickColors: [String]?
+        var penQuickSizes: [CGFloat]?
+        var highlighterQuickColors: [String]?
+        var highlighterQuickSizes: [CGFloat]?
+        var eraserQuickSizes: [CGFloat]?
     }
 
     private static let key = "folio.toolstate.v1"
@@ -133,7 +151,17 @@ final class ToolState: ObservableObject {
             favorites = s.favorites
             recentColors = s.recentColors
             inputMode = s.inputMode
+            penQuickColors = Self.three(s.penQuickColors, Self.defaultPenColors)
+            penQuickSizes = Self.three(s.penQuickSizes, Self.defaultPenSizes)
+            highlighterQuickColors = Self.three(s.highlighterQuickColors, Self.defaultHighlighterColors)
+            highlighterQuickSizes = Self.three(s.highlighterQuickSizes, Self.defaultHighlighterSizes)
+            eraserQuickSizes = Self.three(s.eraserQuickSizes, Self.defaultEraserSizes)
         } else {
+            penQuickColors = Self.defaultPenColors
+            penQuickSizes = Self.defaultPenSizes
+            highlighterQuickColors = Self.defaultHighlighterColors
+            highlighterQuickSizes = Self.defaultHighlighterSizes
+            eraserQuickSizes = Self.defaultEraserSizes
             pen = PenPreset(kind: .ballpoint, colorHex: "#000000", width: 3)
             highlighter = PenPreset(kind: .monoline, colorHex: "#F7E14A", width: 18, opacity: 1)
             eraserMode = .stroke
@@ -154,7 +182,11 @@ final class ToolState: ObservableObject {
         guard !loading else { return }
         let s = Saved(pen: pen, highlighter: highlighter, eraserMode: eraserMode,
                       eraserWidth: eraserWidth, favorites: favorites,
-                      recentColors: recentColors, inputMode: inputMode)
+                      recentColors: recentColors, inputMode: inputMode,
+                      penQuickColors: penQuickColors, penQuickSizes: penQuickSizes,
+                      highlighterQuickColors: highlighterQuickColors,
+                      highlighterQuickSizes: highlighterQuickSizes,
+                      eraserQuickSizes: eraserQuickSizes)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }
@@ -171,6 +203,11 @@ final class ToolState: ObservableObject {
         case .lasso:
             return PKLassoTool()
         }
+    }
+
+    private static func three<T>(_ saved: [T]?, _ fallback: [T]) -> [T] {
+        guard let saved, saved.count == 3 else { return fallback }
+        return saved
     }
 
     func noteRecent(_ hex: String) {

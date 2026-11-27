@@ -15,13 +15,14 @@ struct NotebookCoverView: View {
                                startPoint: .topLeading, endPoint: .bottomTrailing)
                 CoverPatternView(pattern: cover.pattern)
                     .opacity(0.16)
-                LinearGradient(colors: [.black.opacity(0.32), .black.opacity(0.05)],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: w * 0.09, height: h)
+                // Coloured spine with a soft fold shadow.
                 Rectangle()
-                    .fill(Color.white.opacity(0.18))
-                    .frame(width: 1, height: h)
-                    .offset(x: w * 0.09)
+                    .fill(Color(hex: pal.2))
+                    .frame(width: w * 0.1, height: h)
+                LinearGradient(colors: [.black.opacity(0.18), .clear],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: w * 0.05, height: h)
+                    .offset(x: w * 0.1)
                 if let title, !title.isEmpty {
                     Text(title)
                         .font(.system(size: max(8, w * 0.085), weight: .semibold, design: .serif))
@@ -36,11 +37,21 @@ struct NotebookCoverView: View {
                         .position(x: w * 0.545, y: h * 0.3)
                 }
             }
-            .clipShape(UnevenRoundedRectangle(topLeadingRadius: w * 0.025,
-                                              bottomLeadingRadius: w * 0.025,
-                                              bottomTrailingRadius: w * 0.07,
-                                              topTrailingRadius: w * 0.07))
+            .clipShape(CoverShape(width: w))
+            // Hairline edge so dark covers stay visible on a black background.
+            .overlay(CoverShape(width: w).stroke(Color.primary.opacity(0.12), lineWidth: 0.75))
         }
+    }
+}
+
+struct CoverShape: Shape {
+    let width: CGFloat
+    func path(in rect: CGRect) -> Path {
+        UnevenRoundedRectangle(topLeadingRadius: width * 0.025,
+                               bottomLeadingRadius: width * 0.025,
+                               bottomTrailingRadius: width * 0.07,
+                               topTrailingRadius: width * 0.07,
+                               style: .continuous).path(in: rect)
     }
 }
 
@@ -193,43 +204,40 @@ struct NotebookTile: View {
     let notebook: Notebook
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            NotebookCoverView(cover: notebook.cover, title: notebook.title)
-                .aspectRatio(0.76, contentMode: .fit)
-                .shadow(color: .black.opacity(0.18), radius: 6, x: 2, y: 4)
+        VStack(spacing: 4) {
+            NotebookCoverView(cover: notebook.cover)
+                .aspectRatio(0.74, contentMode: .fit)
+                .shadow(color: .black.opacity(0.22), radius: 7, x: 0, y: 4)
+                .overlay(alignment: .topTrailing) {
+                    if notebook.isStarred {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.yellow)
+                            .padding(6)
+                            .background(Circle().fill(Color.black.opacity(0.45)))
+                            .padding(8)
+                    }
+                }
             Text(notebook.title)
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
-                .padding(.top, 4)
-            Text(notebook.modifiedAt.formatted(date: .abbreviated, time: .shortened))
-                .font(.caption)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .padding(.top, 10)
+            Text(Self.dateText(notebook.modifiedAt))
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
     }
-}
 
-struct NewNotebookTile: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
-                .foregroundStyle(Color.secondary.opacity(0.6))
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.5)))
-                .aspectRatio(0.76, contentMode: .fit)
-                .overlay {
-                    VStack(spacing: 8) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 30, weight: .light))
-                        Text("New Notebook")
-                            .font(.footnote.weight(.medium))
-                    }
-                    .foregroundStyle(Theme.accent)
-                }
-            Text(" ").font(.subheadline).padding(.top, 4)
-            Text(" ").font(.caption)
-        }
-        .contentShape(Rectangle())
+    static func dateText(_ d: Date) -> String {
+        let cal = Calendar.current
+        let time = d.formatted(date: .omitted, time: .shortened)
+        if cal.isDateInToday(d) { return "Today, \(time)" }
+        if cal.isDateInYesterday(d) { return "Yesterday, \(time)" }
+        return d.formatted(date: .numeric, time: .shortened)
     }
 }
 
