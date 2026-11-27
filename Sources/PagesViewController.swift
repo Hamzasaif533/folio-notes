@@ -132,6 +132,9 @@ final class PageView: UIView {
         CATransaction.commit()
     }
 
+    /// Its size changed while it was off screen; it lays itself out again when it comes near.
+    func markStale() { zoom = -1 }
+
     var content: PageContent {
         PageContent(drawing: canvas.drawing, elements: model.items, background: background, extent: extent)
     }
@@ -316,13 +319,30 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
             pv.frame = horizontal
                 ? CGRect(x: offsets[i] * z, y: (across - s.height) / 2 * z, width: s.width * z, height: s.height * z)
                 : CGRect(x: (across - s.width) / 2 * z, y: offsets[i] * z, width: s.width * z, height: s.height * z)
-            pv.apply(zoom: z)
         }
         scrollView.contentSize = size
         scrollView.minimumZoomScale = minZoom / z
         scrollView.maximumZoomScale = maxZoom / z
         updateInsets()
+        // Re-render only the pages near the screen now; the rest catch up as you scroll to them.
+        // Redrawing every page after each pinch blocked the next pinch in long notebooks.
+        applyZoomToNearbyPages(force: true)
         zoomBox?.refreshFrame()
+    }
+
+    /// Pages within about a screen of what's visible get laid out at the current zoom.
+    private func applyZoomToNearbyPages(force: Bool = false) {
+        let z = docZoom
+        let visible = scrollView.convert(scrollView.bounds, to: contentView)
+        let margin = horizontal ? visible.width : visible.height
+        let near = visible.insetBy(dx: horizontal ? -margin : 0, dy: horizontal ? 0 : -margin)
+        for pv in pageViews {
+            if pv.frame.intersects(near) {
+                if force || abs(pv.zoom - z) > 0.0001 { pv.apply(zoom: z) }
+            } else if force {
+                pv.markStale()
+            }
+        }
     }
 
     private func updateInsets() {
@@ -393,7 +413,9 @@ final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate 
     }
 
     func scrollViewDidScroll(_ sv: UIScrollView) {
-        guard sv === scrollView, !isBaking else { return }
+        guard sv === scrollView else { return }
+        applyZoomToNearbyPages()
+        guard !isBaking else { return }
         reportPage(force: false)
     }
 

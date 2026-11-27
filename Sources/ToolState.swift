@@ -284,6 +284,7 @@ final class ToolState: ObservableObject {
     @Published var textSize: CGFloat { didSet { save() } }
     @Published var tapeColorHex: String { didSet { save() } }
     @Published var tapeWidth: CGFloat { didSet { save() } }
+    @Published var tapeQuickSizes: [CGFloat] { didSet { save() } }
     @Published var toolbarItems: [ToolbarItemKind] { didSet { save() } }
     @Published var rulerActive = false
 
@@ -292,6 +293,7 @@ final class ToolState: ObservableObject {
     static let defaultHighlighterColors = ["#F7E14A", "#A3D977", "#FF9EC4"]
     static let defaultHighlighterSizes: [CGFloat] = [10, 18, 30]
     static let defaultEraserSizes: [CGFloat] = [10, 25, 50]
+    static let defaultTapeSizes: [CGFloat] = [18, 30, 46]
 
     private struct Saved: Codable {
         var pen: PenPreset
@@ -315,6 +317,8 @@ final class ToolState: ObservableObject {
         var tapeColorHex: String?
         var tapeWidth: CGFloat?
         var toolbarItems: [String]?
+        // Added in 1.5.
+        var tapeQuickSizes: [CGFloat]?
     }
 
     private static let key = "folio.toolstate.v1"
@@ -340,6 +344,7 @@ final class ToolState: ObservableObject {
             textSize = s.textSize ?? 22
             tapeColorHex = s.tapeColorHex ?? "#F2B8C6"
             tapeWidth = s.tapeWidth ?? 30
+            tapeQuickSizes = Self.three(s.tapeQuickSizes, Self.defaultTapeSizes)
             toolbarItems = s.toolbarItems.map { $0.compactMap(ToolbarItemKind.init(rawValue:)) } ?? ToolbarItemKind.defaults
         } else {
             textColorHex = "#1C1C1E"
@@ -347,6 +352,7 @@ final class ToolState: ObservableObject {
             tapeColorHex = "#F2B8C6"
             tapeWidth = 30
             toolbarItems = ToolbarItemKind.defaults
+            tapeQuickSizes = Self.defaultTapeSizes
             penQuickColors = Self.defaultPenColors
             penQuickSizes = Self.defaultPenSizes
             highlighterQuickColors = Self.defaultHighlighterColors
@@ -384,7 +390,8 @@ final class ToolState: ObservableObject {
                       palmMigrated: true,
                       textColorHex: textColorHex, textSize: textSize,
                       tapeColorHex: tapeColorHex, tapeWidth: tapeWidth,
-                      toolbarItems: toolbarItems.map(\.rawValue))
+                      toolbarItems: toolbarItems.map { $0.rawValue },
+                      tapeQuickSizes: tapeQuickSizes)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }

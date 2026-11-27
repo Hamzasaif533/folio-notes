@@ -62,10 +62,10 @@ struct SplitEditorView: View {
             let firstLength = max(0, (total - Self.divider) * CGFloat(fraction))
             let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
             layout {
-                pane(first, other: second, replace: { first = $0 })
+                pane(first, other: second, bars: true, replace: { first = $0 })
                     .frame(width: sideBySide ? firstLength : nil, height: sideBySide ? nil : firstLength)
                 dividerBar(total: total)
-                pane(second, other: first, replace: { second = $0 })
+                pane(second, other: first, bars: false, replace: { second = $0 })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .animation(.easeOut(duration: 0.25), value: sideBySide)
@@ -74,8 +74,10 @@ struct SplitEditorView: View {
         .ignoresSafeArea()
     }
 
-    private func pane(_ nb: Notebook, other: Notebook, replace: @escaping (Notebook) -> Void) -> some View {
-        EditorView(notebook: nb, onSwitch: { replace($0) }, onClose: { onEnd(other) })
+    /// Both sides share one set of tools, so only the first side shows the tool bars.
+    private func pane(_ nb: Notebook, other: Notebook, bars: Bool, replace: @escaping (Notebook) -> Void) -> some View {
+        EditorView(notebook: nb, onSwitch: { replace($0) }, onClose: { onEnd(other) },
+                   inSplit: true, showsToolBars: bars)
             .id(nb.id)
             .clipped()
     }

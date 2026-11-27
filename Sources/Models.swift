@@ -39,10 +39,31 @@ struct PageElement: Codable, Identifiable, Hashable {
     var imageFile: String? = nil
     var symbol: String? = nil
     var revealed: Bool? = nil
+    // Added in 1.5: freehand tape. The path's points as x,y pairs, each 0…1 across the
+    // frame (minus half the band on every side), so moving or resizing the tape keeps its shape.
+    var points: [CGFloat]? = nil
+    /// Width of the tape band in page units.
+    var lineWidth: CGFloat? = nil
 
     var frame: CGRect {
         get { CGRect(x: x, y: y, width: w, height: h) }
         set { x = newValue.minX; y = newValue.minY; w = newValue.width; h = newValue.height }
+    }
+
+    /// The freehand tape's centre line inside `rect` (the element's frame in some coordinate space,
+    /// `scale` = points per page unit). Nil for old, rectangular tape.
+    func tapePath(in rect: CGRect, scale: CGFloat) -> CGPath? {
+        guard kind == .tape, let pts = points, pts.count >= 4 else { return nil }
+        let half = (lineWidth ?? 30) * scale / 2
+        let inner = rect.insetBy(dx: min(half, rect.width / 2), dy: min(half, rect.height / 2))
+        let path = CGMutablePath()
+        var i = 0
+        while i + 1 < pts.count {
+            let p = CGPoint(x: inner.minX + pts[i] * inner.width, y: inner.minY + pts[i + 1] * inner.height)
+            if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+            i += 2
+        }
+        return path
     }
 }
 

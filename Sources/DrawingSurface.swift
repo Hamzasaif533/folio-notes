@@ -22,7 +22,7 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     private(set) var readOnly = false
     var textColorHex = "#1C1C1E"
     var textSize: CGFloat = 22
-    var tapeColorHex = "#F2B8C6" { didSet { tapePreview.fillColor = UIColor(hex: tapeColorHex).withAlphaComponent(0.6).cgColor } }
+    var tapeColorHex = "#F2B8C6" { didSet { tapePreview.strokeColor = UIColor(hex: tapeColorHex).cgColor } }
     /// Tape thickness in page units.
     var tapeWidth: CGFloat = 30
 
@@ -51,7 +51,7 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     private lazy var laserPress = UILongPressGestureRecognizer(target: self, action: #selector(laserMoved(_:)))
     private lazy var tapePress = UILongPressGestureRecognizer(target: self, action: #selector(tapeMoved(_:)))
     private lazy var textTap = UITapGestureRecognizer(target: self, action: #selector(textTapped(_:)))
-    private var tapeStart: CGPoint = .zero
+    private var tapePoints: [CGPoint] = []
     private var tapeLayer: ElementsLayer?
 
     private var strokeCounts: [ObjectIdentifier: Int] = [:]
@@ -110,8 +110,10 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         laser.frame = view.bounds
         laser.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(laser)
-        tapePreview.fillColor = UIColor(hex: tapeColorHex).withAlphaComponent(0.6).cgColor
-        tapePreview.strokeColor = nil
+        tapePreview.fillColor = nil
+        tapePreview.strokeColor = UIColor(hex: tapeColorHex).cgColor
+        tapePreview.lineCap = .butt
+        tapePreview.lineJoin = .round
         laser.layer.addSublayer(tapePreview)
     }
 
@@ -138,6 +140,10 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
     // MARK: Tools
 
     func setTool(_ newTool: PKTool) {
+        // SwiftUI calls this on every redraw; handing the same tool to every page again is wasted work.
+        if let a = newTool as? PKInkingTool, let b = tool as? PKInkingTool, a == b { return }
+        if let a = newTool as? PKEraserTool, let b = tool as? PKEraserTool, a == b { return }
+        if newTool is PKLassoTool && tool is PKLassoTool { return }
         tool = newTool
         applyTool()
     }
@@ -220,8 +226,12 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         palmBlocker.cancelsTouchesInView = false
         palmBlocker.delaysTouchesEnded = false
         sv.addGestureRecognizer(palmBlocker)
+        // Only scrolling waits for the palm check. A thumb pressed flat in a pinch can look as
+        // big as a palm, and making the pinch wait for it is what made zoom ignore you at times.
         sv.panGestureRecognizer.require(toFail: palmBlocker)
-        sv.pinchGestureRecognizer?.require(toFail: palmBlocker)
+        // Pinch with fingers (or a trackpad) only, never the Pencil plus a resting hand.
+        sv.pinchGestureRecognizer?.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue),
+                                                         NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         applyInputMode()
     }
 
@@ -285,7 +295,8 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
         let block = ((toolInUse || pencilNearby) && !fingerDraws && !readOnly) || touchingObject
         sv.panGestureRecognizer.isEnabled = !block
         // Pinch stays available while the Pencil hovers: turning it off then made zoom feel unresponsive.
-        sv.pinchGestureRecognizer?.isEnabled = !touchingObject && !zoomLocked
+        // (Only off while the Pencil is actually drawing, so a palm plus a stray finger can't zoom mid-stroke.)
+        sv.pinchGestureRecognizer?.isEnabled = !touchingObject && !zoomLocked && !(toolInUse && !fingerDraws)
     }
 
     // MARK: Pen feel & shapes
@@ -341,39 +352,70 @@ class DrawingSurfaceController: UIViewController, UIPencilInteractionDelegate, U
 
     // MARK: Tape
 
+    /// Tape follows your finger or Pencil freely, as a solid band `tapeWidth` page units wide.
     @objc private func tapeMoved(_ g: UILongPressGestureRecognizer) {
         let p = g.location(in: view)
+        let scale = tapeLayer?.scale ?? 1
         switch g.state {
         case .began:
             onDrawingStarted?()
-            tapeStart = p
             tapeLayer = objectLayers(at: p)?.over
+            tapePoints = [p]
             tapePreview.path = nil
+            tapePreview.lineWidth = tapeWidth * (tapeLayer?.scale ?? 1)
         case .changed:
-            guard let r = tapeRect(from: tapeStart, to: p, scale: tapeLayer?.scale ?? 1) else { tapePreview.path = nil; return }
-            tapePreview.path = UIBezierPath(roundedRect: r, cornerRadius: 2).cgPath
+            // Skip tiny moves so the band stays smooth.
+            if let last = tapePoints.last, hypot(p.x - last.x, p.y - last.y) < 3 { return }
+            tapePoints.append(p)
+            tapePreview.lineWidth = tapeWidth * scale
+            tapePreview.path = tapeLength > 12 * scale ? Self.smoothPath(tapePoints) : nil
         default:
             tapePreview.path = nil
-            guard g.state == .ended, let layer = tapeLayer,
-                  let r = tapeRect(from: tapeStart, to: p, scale: layer.scale) else { return }
-            let a = layer.unitPoint(view.convert(r.origin, to: layer))
-            let b = layer.unitPoint(view.convert(CGPoint(x: r.maxX, y: r.maxY), to: layer))
-            let e = PageElement(kind: .tape, x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y,
+            defer { tapeLayer = nil; tapePoints = [] }
+            guard g.state == .ended, let layer = tapeLayer, tapeLength > 12 * layer.scale else { return }
+            if let last = tapePoints.last, last != p { tapePoints.append(p) }
+            // Into page units, smoothed a little, then stored relative to the band's box.
+            let units = Self.smoothed(tapePoints).map { layer.unitPoint(view.convert($0, to: layer)) }
+            let half = tapeWidth / 2
+            let xs = units.map(\.x), ys = units.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return }
+            let w = maxX - minX, h = maxY - minY
+            var flat: [CGFloat] = []
+            for u in units {
+                flat.append(w > 0.01 ? (u.x - minX) / w : 0.5)
+                flat.append(h > 0.01 ? (u.y - minY) / h : 0.5)
+            }
+            var e = PageElement(kind: .tape, x: minX - half, y: minY - half, w: w + half * 2, h: h + half * 2,
                                 colorHex: tapeColorHex)
+            e.points = flat
+            e.lineWidth = tapeWidth
             layer.model.add(e)
-            tapeLayer = nil
         }
     }
 
-    /// A strip of tape along the drag (horizontal or vertical), `tapeWidth` page units thick.
-    private func tapeRect(from a: CGPoint, to b: CGPoint, scale: CGFloat) -> CGRect? {
-        let dx = b.x - a.x, dy = b.y - a.y
-        let thick = tapeWidth * scale
-        guard max(abs(dx), abs(dy)) > 12 * scale else { return nil }
-        if abs(dx) >= abs(dy) {
-            return CGRect(x: min(a.x, b.x), y: a.y - thick / 2, width: abs(dx), height: thick)
+    private var tapeLength: CGFloat {
+        zip(tapePoints, tapePoints.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+    }
+
+    /// Averages each point with its neighbours to take the shake out of a hand-drawn line.
+    private static func smoothed(_ pts: [CGPoint]) -> [CGPoint] {
+        guard pts.count > 2 else { return pts }
+        var out = [pts[0]]
+        for i in 1..<(pts.count - 1) {
+            let a = pts[i - 1], b = pts[i], c = pts[i + 1]
+            out.append(CGPoint(x: (a.x + b.x * 2 + c.x) / 4, y: (a.y + b.y * 2 + c.y) / 4))
         }
-        return CGRect(x: a.x - thick / 2, y: min(a.y, b.y), width: thick, height: abs(dy))
+        out.append(pts[pts.count - 1])
+        return out
+    }
+
+    private static func smoothPath(_ pts: [CGPoint]) -> CGPath {
+        let path = CGMutablePath()
+        let s = smoothed(pts)
+        guard let first = s.first else { return path }
+        path.move(to: first)
+        for q in s.dropFirst() { path.addLine(to: q) }
+        return path
     }
 
     // MARK: Text boxes
@@ -520,7 +562,7 @@ final class LaserOverlay: UIView {
 /// Recognises a resting palm (a very large touch) so the page doesn't scroll
 /// under the hand while writing. Normal finger touches fail it immediately.
 final class PalmGestureRecognizer: UIGestureRecognizer {
-    static let palmRadius: CGFloat = 32
+    static let palmRadius: CGFloat = 42
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         if touches.contains(where: Self.isPalm) {

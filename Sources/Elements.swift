@@ -162,6 +162,8 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
     private let imageView = UIImageView()
     private let label = UILabel()
     private let tapeView = UIView()
+    /// Freehand tape: a thick band along the path you drew.
+    private let tapeShape = CAShapeLayer()
     private let border = CAShapeLayer()
     private let handle = UIView()
     private var dragStart: CGRect = .zero
@@ -185,7 +187,11 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
         label.textAlignment = .center
         label.adjustsFontSizeToFitWidth = true
         label.minimumScaleFactor = 0.2
-        tapeView.layer.cornerRadius = 2
+        tapeView.layer.cornerRadius = 1
+        tapeShape.fillColor = nil
+        tapeShape.lineCap = .butt
+        tapeShape.lineJoin = .round
+        tapeView.layer.addSublayer(tapeShape)
         [tapeView, imageView, textView, label].forEach { addSubview($0) }
 
         border.fillColor = nil
@@ -230,6 +236,12 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
             label.font = .systemFont(ofSize: max(b.height * 0.82, 4))
         case .tape:
             tapeView.frame = b
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            tapeShape.frame = b
+            tapeShape.path = element.tapePath(in: b, scale: s)
+            tapeShape.lineWidth = (element.lineWidth ?? 30) * s
+            CATransaction.commit()
         }
         if element.kind == .sticky {
             layer.shadowPath = UIBezierPath(rect: b).cgPath
@@ -285,7 +297,14 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
                 label.text = element.text
             }
         case .tape:
-            tapeView.backgroundColor = UIColor(patternImage: Self.tapePattern(color))
+            // Solid and not see-through (tap it to peek underneath).
+            if element.points == nil {
+                tapeView.backgroundColor = color
+                tapeShape.strokeColor = nil
+            } else {
+                tapeView.backgroundColor = .clear
+                tapeShape.strokeColor = color.cgColor
+            }
             tapeView.alpha = (element.revealed ?? false) ? 0.22 : 1
         }
         applyLayout()
@@ -299,18 +318,15 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
         handle.isHidden = !(editing && isSelected)
     }
 
-    /// Washi-tape look: the colour with fine diagonal stripes.
-    private static func tapePattern(_ color: UIColor) -> UIImage {
-        let size = CGSize(width: 12, height: 12)
-        return UIGraphicsImageRenderer(size: size).image { ctx in
-            color.withAlphaComponent(0.92).setFill()
-            ctx.fill(CGRect(origin: .zero, size: size))
-            UIColor.white.withAlphaComponent(0.22).setStroke()
-            let p = UIBezierPath()
-            p.lineWidth = 3
-            p.move(to: CGPoint(x: -2, y: 14)); p.addLine(to: CGPoint(x: 14, y: -2))
-            p.stroke()
+    /// Freehand tape only answers touches on the band itself, not the empty box around it,
+    /// so you can keep writing right next to a curved strip.
+    override func point(inside p: CGPoint, with event: UIEvent?) -> Bool {
+        if element.kind == .tape, !layerOwner.editing, let path = tapeShape.path {
+            let band = path.copy(strokingWithWidth: max(tapeShape.lineWidth, 22), lineCap: .butt,
+                                 lineJoin: .round, miterLimit: 1)
+            return band.contains(p)
         }
+        return super.point(inside: p, with: event)
     }
 
     // MARK: Gestures
@@ -450,7 +466,8 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
                 })
             }
             if self.element.kind == .sticky || self.element.kind == .tape || self.element.kind == .text {
-                let colors = self.element.kind == .text ? Theme.penColors.prefix(8).map { $0 } : Self.softColors
+                let colors = self.element.kind == .text ? Theme.penColors.prefix(8).map { $0 }
+                    : (self.element.kind == .tape ? Self.tapeColors : Self.softColors)
                 let items = colors.map { hex in
                     UIAction(title: hex, image: UIImage(systemName: "circle.fill")?
                         .withTintColor(UIColor(hex: hex), renderingMode: .alwaysOriginal)) { [weak self] _ in
@@ -480,6 +497,8 @@ final class ElementView: UIView, UITextViewDelegate, UIContextMenuInteractionDel
     }
 
     static let softColors = ["#FFE680", "#FFB8D1", "#B8E6FF", "#C8F0B0", "#FFD0A8", "#D9C8FF"]
+    /// Solid tape colours, strong enough to hide what's underneath.
+    static let tapeColors = ["#F2B8C6", "#FFD166", "#8ECAE6", "#95D5B2", "#FFB085", "#C3AED6", "#5C5C66"]
 }
 
 // MARK: - Drawing objects into images and PDFs
@@ -526,8 +545,19 @@ enum ElementRenderer {
                 }
             case .tape:
                 if !(e.revealed ?? false) {
-                    color.withAlphaComponent(0.92).setFill()
-                    ctx.fill(r)
+                    if let path = e.tapePath(in: r, scale: 1) {
+                        ctx.saveGState()
+                        ctx.addPath(path)
+                        ctx.setStrokeColor(color.cgColor)
+                        ctx.setLineWidth(e.lineWidth ?? 30)
+                        ctx.setLineCap(.butt)
+                        ctx.setLineJoin(.round)
+                        ctx.strokePath()
+                        ctx.restoreGState()
+                    } else {
+                        color.setFill()
+                        ctx.fill(r)
+                    }
                 }
             }
         }

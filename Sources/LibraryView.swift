@@ -118,6 +118,7 @@ struct LibraryView: View {
 
 struct SidebarView: View {
     @EnvironmentObject var store: LibraryStore
+    @EnvironmentObject var themes: ThemeCenter
     @Binding var selection: SidebarItem
     let onNewFolder: () -> Void
     let onEditFolder: (Folder) -> Void
@@ -129,11 +130,24 @@ struct SidebarView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Folio")
-                    .font(.system(size: 38, weight: .regular, design: .serif))
-                    .padding(.top, 14)
-                    .padding(.bottom, 8)
-                    .padding(.leading, 4)
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Folio")
+                        .font(.system(size: 38, weight: .regular, design: .serif))
+                    Spacer()
+                    Button { themes.showPicker = true } label: {
+                        Image(systemName: "paintpalette")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 40, height: 40)
+                            .background(Circle().fill(Theme.tileFill))
+                            .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
+                    }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityLabel("Themes")
+                }
+                .padding(.top, 14)
+                .padding(.bottom, 8)
+                .padding(.horizontal, 4)
 
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                     tile(.all, title: "All Notes", icon: "house", tint: .primary, count: store.activeNotebooks.count)
@@ -215,8 +229,17 @@ struct SidebarView: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(selected ? Theme.accent : Theme.tileFill))
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+                if selected {
+                    shape.fill(LinearGradient(colors: [Theme.accent, Theme.accent.opacity(0.78)],
+                                              startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .shadow(color: Theme.accent.opacity(0.35), radius: 8, y: 4)
+                } else {
+                    shape.fill(Theme.tileFill)
+                        .shadow(color: .black.opacity(0.04), radius: 3, y: 1)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(PressableStyle(scale: 0.95))
@@ -428,7 +451,7 @@ struct NotesGridView: View {
             .animation(.spring(response: 0.42, dampingFraction: 0.86), value: items.map(\.id))
             .animation(.spring(response: 0.42, dampingFraction: 0.86), value: largeTiles)
         }
-        .background(Theme.libraryBackground.ignoresSafeArea())
+        .background(Theme.backdrop.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             if selecting { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }

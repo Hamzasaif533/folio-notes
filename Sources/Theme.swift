@@ -39,15 +39,32 @@ enum Theme {
         UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: dark) : UIColor(hex: light) }
     }
 
-    /// Coral: selected sidebar tiles.
-    static let accent = Color(hex: "#E8714F")
-    /// Cyan: primary actions and the selected tool.
-    static let action = Color(hex: "#18AFC9")
-    static let libraryBackground = Color(uiColor: dynamic(light: "#F7F7F9", dark: "#000000"))
-    static let sidebarPanel = Color(uiColor: dynamic(light: "#EDEDF0", dark: "#1C1C1E"))
-    static let tileFill = Color(uiColor: dynamic(light: "#FFFFFF", dark: "#2C2C2E"))
-    static let shelfBackground = libraryBackground
-    static let deskBackground = dynamic(light: "#E3E3E8", dark: "#111113")
+    // Everything below follows the theme picked in Themes (paint palette in the sidebar).
+    private static var cached: (AppTheme, ThemePalette)?
+    private static var p: ThemePalette {
+        if let c = cached, c.0 == AppTheme.current { return c.1 }
+        let v = AppTheme.current.palette
+        cached = (AppTheme.current, v)
+        return v
+    }
+
+    /// Selected sidebar tiles and highlights.
+    static var accent: Color { Color(uiColor: p.accent) }
+    /// Primary actions and the selected tool.
+    static var action: Color { Color(uiColor: p.action) }
+    static var libraryBackground: Color { Color(uiColor: p.background) }
+    static var sidebarPanel: Color { Color(uiColor: p.sidebar) }
+    static var tileFill: Color { Color(uiColor: p.tile) }
+    static var shelfBackground: Color { libraryBackground }
+    static var deskBackground: UIColor { p.desk }
+    /// A soft wash of the theme colour behind the library.
+    static var backdrop: some View {
+        ZStack {
+            libraryBackground
+            LinearGradient(colors: [accent.opacity(0.13), accent.opacity(0.03), .clear],
+                           startPoint: .top, endPoint: .center)
+        }
+    }
 
     static let folderColors: [String] = [
         "#5B8DEF", "#E8613C", "#3FB68B", "#F2B33D",

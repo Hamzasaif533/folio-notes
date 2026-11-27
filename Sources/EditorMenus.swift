@@ -13,7 +13,7 @@ enum EditorAction {
 
 // MARK: - Dark menu building blocks (Noteshelf-style)
 
-private let menuAccent = Theme.action
+private var menuAccent: Color { Theme.action }
 
 struct MenuBlock<Content: View>: View {
     @ViewBuilder var content: Content

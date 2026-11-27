@@ -12,7 +12,9 @@ final class EditorController: ObservableObject {
     @Published var pageCount = 1
     @Published var canUndo = false
     @Published var canRedo = false
-    @Published var zoomPercent = 100
+    /// Kept outside the controller's own @Published values: it changes every frame
+    /// of a pinch, and redrawing the whole editor that often made zooming stutter.
+    let zoom = ZoomReadout()
     @Published var zoomBoxOpen = false
     /// Where Apple Pencil Pro was squeezed (opens the quick menu there).
     @Published var squeezePoint: CGPoint?
@@ -22,6 +24,22 @@ final class EditorController: ObservableObject {
     /// Short messages from the page (e.g. "Undo" after a two-finger tap).
     @Published var messageCount = 0
     var lastMessage = ""
+}
+
+@MainActor
+final class ZoomReadout: ObservableObject {
+    @Published var percent = 100
+}
+
+/// The "100%" in the bottom pill; only this redraws while you pinch.
+private struct ZoomPercentText: View {
+    @ObservedObject var readout: ZoomReadout
+    var body: some View {
+        Text("\(readout.percent)%")
+            .contentTransition(.numericText())
+            .animation(.snappy, value: readout.percent)
+            .accessibilityLabel("Zoom \(readout.percent) percent")
+    }
 }
 
 /// Hosts the paged notebook or the infinite canvas.
@@ -59,7 +77,7 @@ struct SurfaceHost: UIViewControllerRepresentable {
             }
         }
         vc.onZoomChanged = { z in
-            DispatchQueue.main.async { if ctrl.zoomPercent != z { ctrl.zoomPercent = z } }
+            DispatchQueue.main.async { if ctrl.zoom.percent != z { ctrl.zoom.percent = z } }
         }
         vc.onPencilDoubleTap = { DispatchQueue.main.async { ctrl.doubleTaps += 1 } }
         vc.onFiveFingerTap = { DispatchQueue.main.async { ctrl.fiveTaps += 1 } }
@@ -171,6 +189,10 @@ struct EditorView: View {
     var onClose: (() -> Void)? = nil
     /// Opens another notebook next to this one (nil while already split).
     var onSplit: ((Notebook) -> Void)? = nil
+    /// One side of split screen: no pages panel or All Notes here.
+    var inSplit = false
+    /// In split screen only one side shows the tool and colour bars (the tools are shared).
+    var showsToolBars = true
 
     @StateObject private var controller = EditorController()
     @AppStorage("folio.toolbarDock") private var dockRaw = ToolbarDock.top.rawValue
@@ -192,6 +214,7 @@ struct EditorView: View {
     @State private var barMovedAt = Date.distantPast
     @State private var showPenTypes = false
     @State private var editingColor: Int?
+    @State private var editingSize: Int?
     @State private var pageClip: PageClip? = PageClip.current
     @State private var pendingDeleteIndex: Int?
     @State private var showSplitPicker = false
@@ -246,7 +269,7 @@ struct EditorView: View {
                             inputMode: tools.inputMode, ruler: tools.rulerActive, controller: controller)
                     .ignoresSafeArea()
 
-                if !isCanvas && !showSidebar {
+                if !isCanvas && !showSidebar && !inSplit {
                     edgeSwipeArea
                 }
 
@@ -261,7 +284,7 @@ struct EditorView: View {
                         .transition(.opacity)
                 }
 
-                if showSidebar && !isCanvas {
+                if showSidebar && !isCanvas && !inSplit {
                     Color.black.opacity(0.18)
                         .ignoresSafeArea()
                         .onTapGesture { showSidebar = false; showAllNotes = false }
@@ -463,8 +486,10 @@ struct EditorView: View {
             .padding(.top, 8)
             .frame(maxHeight: .infinity, alignment: .top)
 
-            placed(.tools, size: size)
-            if tools.tool.hasContextBar && !readOnly {
+            if showsToolBars {
+                placed(.tools, size: size)
+            }
+            if showsToolBars && tools.tool.hasContextBar && !readOnly {
                 placed(.colors, size: size)
                     .transition(.opacity.combined(with: .scale(scale: 0.94)))
             }
@@ -587,7 +612,7 @@ struct EditorView: View {
                 controller.surface?.saveAll()
                 if let onClose { onClose() } else { dismiss() }
             }
-            if !isCanvas {
+            if !isCanvas && !inSplit {
                 barButton("square.grid.2x2", label: "Pages") { showSidebar.toggle() }
             }
             barButton("arrow.uturn.backward", label: "Undo", enabled: controller.canUndo) {
@@ -635,7 +660,7 @@ struct EditorView: View {
     // MARK: Tools bar
 
     private var extraItems: [ToolbarItemKind] {
-        tools.toolbarItems.filter { !(isCanvas && $0.pagedOnly) }
+        tools.toolbarItems.filter { !(isCanvas && $0.pagedOnly) && !(inSplit && ($0 == .allNotes || $0 == .search)) }
     }
 
     private func toolsGroup(vertical: Bool, size: CGSize) -> some View {
@@ -803,40 +828,24 @@ struct EditorView: View {
             case .pen, .shapes:
                 colorSlots(\.penQuickColors, current: \.pen.colorHex)
                 barDivider(vertical)
-                ForEach(0..<3, id: \.self) { i in
-                    quickSize(index: i, selected: abs(tools.pen.width - tools.penQuickSizes[i]) < 0.05) {
-                        tools.pen.width = tools.penQuickSizes[i]
-                    }
-                }
+                sizeSlots(\.penQuickSizes, current: \.pen.width, range: tools.pen.kind.widthRange, color: tools.pen.colorHex)
             case .highlighter:
                 colorSlots(\.highlighterQuickColors, current: \.highlighter.colorHex)
                 barDivider(vertical)
-                ForEach(0..<3, id: \.self) { i in
-                    quickSize(index: i, selected: abs(tools.highlighter.width - tools.highlighterQuickSizes[i]) < 0.05) {
-                        tools.highlighter.width = tools.highlighterQuickSizes[i]
-                    }
-                }
+                sizeSlots(\.highlighterQuickSizes, current: \.highlighter.width, range: 4...60, color: tools.highlighter.colorHex)
             case .eraser:
                 eraserModeButton(.stroke, symbol: "scribble", label: "Whole Stroke", compact: vertical)
                 eraserModeButton(.pixel, symbol: "circle.dotted", label: "Precise", compact: vertical)
                 if tools.eraserMode == .pixel {
                     barDivider(vertical)
-                    ForEach(0..<3, id: \.self) { i in
-                        quickSize(index: i, selected: abs(tools.eraserWidth - tools.eraserQuickSizes[i]) < 0.05) {
-                            tools.eraserWidth = tools.eraserQuickSizes[i]
-                        }
-                    }
+                    sizeSlots(\.eraserQuickSizes, current: \.eraserWidth, range: 4...100, color: "#8E8E93")
                 }
             case .tape:
-                ForEach(ElementView.softColors, id: \.self) { hex in
+                ForEach(ElementView.tapeColors, id: \.self) { hex in
                     quickColor(hex: hex, selected: tools.tapeColorHex == hex) { tools.tapeColorHex = hex }
                 }
                 barDivider(vertical)
-                ForEach(0..<3, id: \.self) { i in
-                    quickSize(index: i, selected: abs(tools.tapeWidth - Self.tapeWidths[i]) < 0.5) {
-                        tools.tapeWidth = Self.tapeWidths[i]
-                    }
-                }
+                sizeSlots(\.tapeQuickSizes, current: \.tapeWidth, range: 8...90, color: tools.tapeColorHex, flat: true)
             case .text:
                 ForEach(Array((["#1C1C1E"] + tools.penQuickColors).enumerated()), id: \.offset) { _, hex in
                     quickColor(hex: hex, selected: tools.textColorHex == hex) {
@@ -867,10 +876,33 @@ struct EditorView: View {
         .animation(.snappy(duration: 0.2), value: tools.highlighter.colorHex)
         .animation(.snappy(duration: 0.2), value: tools.penQuickColors)
         .animation(.snappy(duration: 0.2), value: tools.highlighterQuickColors)
-        .onChange(of: tools.tool) { _, _ in editingColor = nil }
+        .onChange(of: tools.tool) { _, _ in editingColor = nil; editingSize = nil }
     }
 
-    private static let tapeWidths: [CGFloat] = [18, 30, 46]
+    /// The three size holes for a tool. Tap one to use it; tap the one in use to fine-tune it with a slider.
+    @ViewBuilder
+    private func sizeSlots(_ slots: ReferenceWritableKeyPath<ToolState, [CGFloat]>,
+                           current: ReferenceWritableKeyPath<ToolState, CGFloat>,
+                           range: ClosedRange<CGFloat>, color: String, flat: Bool = false) -> some View {
+        let list = tools[keyPath: slots]
+        ForEach(Array(list.prefix(3).enumerated()), id: \.offset) { i, w in
+            let selected = abs(tools[keyPath: current] - w) < 0.05
+            quickSize(index: i, value: w, range: range, selected: selected) {
+                if selected { editingSize = i } else { tools[keyPath: current] = w }
+            }
+            .popover(isPresented: Binding(get: { editingSize == i }, set: { if !$0 { editingSize = nil } })) {
+                SizeSlotPicker(
+                    value: Binding(
+                        get: { tools[keyPath: slots].indices.contains(i) ? tools[keyPath: slots][i] : w },
+                        set: { new in
+                            let v = (new * 10).rounded() / 10
+                            if tools[keyPath: slots].indices.contains(i) { tools[keyPath: slots][i] = v }
+                            tools[keyPath: current] = v
+                        }),
+                    range: range, colorHex: color, flat: flat)
+            }
+        }
+    }
 
     /// The colour holes for a tool. Tap one to use it; tap the one in use to change its colour
     /// (or delete it); + adds another hole.
@@ -948,11 +980,14 @@ struct EditorView: View {
         .buttonStyle(PressableStyle())
     }
 
-    private func quickSize(index: Int, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button { if !barJustMoved { action() } } label: {
+    private func quickSize(index: Int, value: CGFloat, range: ClosedRange<CGFloat>, selected: Bool,
+                           action: @escaping () -> Void) -> some View {
+        // The line gets thicker with the real size, so a tuned size still looks right.
+        let t = (value - range.lowerBound) / max(range.upperBound - range.lowerBound, 0.01)
+        return Button { if !barJustMoved { action() } } label: {
             Capsule()
                 .fill(Color.primary)
-                .frame(width: 20, height: [2, 3.5, 6][index])
+                .frame(width: 20, height: 1.5 + sqrt(min(max(t, 0), 1)) * 8)
                 .frame(width: 40, height: 30)
                 .background(Capsule().fill(selected ? Theme.action.opacity(0.25) : Color.clear))
                 .contentShape(Rectangle())
@@ -1053,15 +1088,13 @@ struct EditorView: View {
                     if controller.zoomLocked {
                         Image(systemName: "lock.fill").font(.system(size: 10, weight: .bold))
                     }
-                    Text("\(controller.zoomPercent)%")
-                        .contentTransition(.numericText())
+                    ZoomPercentText(readout: controller.zoom)
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 38)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Zoom \(controller.zoomPercent) percent")
             if readOnly {
                 pillDivider
                 Button { perform(.readOnly) } label: {
@@ -1080,7 +1113,6 @@ struct EditorView: View {
         .padding(.horizontal, 4)
         .clearGlass(Capsule())
         .animation(.snappy, value: controller.pageIndex)
-        .animation(.snappy, value: controller.zoomPercent)
     }
 
     private var pillDivider: some View {
@@ -1285,10 +1317,12 @@ struct EditorView: View {
             showToast(tools.toolTitle)
         case .allNotes:
             closeMenus()
+            guard !inSplit else { showToast("Close split screen to see All Notes"); return }
             showSidebar = true
             showAllNotes = true
         case .search:
             closeMenus()
+            guard !inSplit else { showToast("Close split screen to search pages"); return }
             showSidebar = true
         }
     }

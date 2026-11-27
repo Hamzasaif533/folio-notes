@@ -46,6 +46,71 @@ struct PenTypePicker: View {
     }
 }
 
+/// Tapping the size that's already in use: fine-tune it with a slider.
+struct SizeSlotPicker: View {
+    @Binding var value: CGFloat
+    let range: ClosedRange<CGFloat>
+    /// Colour of the sample line (the tool's current colour).
+    let colorHex: String
+    /// Tape is drawn as a flat band; ink as a rounded line.
+    var flat = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack {
+                Text("Size").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(value < 10 ? String(format: "%.1f", Double(value)) : "\(Int(value.rounded()))")
+                    .font(.subheadline.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .foregroundStyle(.white)
+
+            // A sample of the line at this size (capped so huge sizes still fit).
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white)
+                SampleStroke()
+                    .stroke(Color(hex: colorHex),
+                            style: StrokeStyle(lineWidth: min(value, 44), lineCap: flat ? .butt : .round, lineJoin: .round))
+                    .padding(.horizontal, 26)
+            }
+            .frame(height: 70)
+
+            HStack(spacing: 10) {
+                Button { nudge(-1) } label: { Image(systemName: "minus") }
+                    .buttonStyle(PressableStyle())
+                Slider(value: Binding(get: { Double(value) }, set: { value = CGFloat($0) }),
+                       in: Double(range.lowerBound)...Double(range.upperBound))
+                    .tint(Theme.action)
+                Button { nudge(1) } label: { Image(systemName: "plus") }
+                    .buttonStyle(PressableStyle())
+            }
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(16)
+        .frame(width: 300)
+        .presentationCompactAdaptation(.popover)
+        .darkPanel()
+    }
+
+    private func nudge(_ dir: CGFloat) {
+        let step: CGFloat = range.upperBound - range.lowerBound > 40 ? 2 : 0.5
+        value = min(max(value + dir * step, range.lowerBound), range.upperBound)
+    }
+}
+
+private struct SampleStroke: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.midY + 6))
+        p.addCurve(to: CGPoint(x: r.maxX, y: r.midY - 6),
+                   control1: CGPoint(x: r.minX + r.width * 0.35, y: r.midY - 16),
+                   control2: CGPoint(x: r.minX + r.width * 0.65, y: r.midY + 16))
+        return p
+    }
+}
+
 /// Tapping the colour that's already in use: change that colour hole, and nothing else.
 struct ColorSlotPicker: View {
     @Binding var hex: String

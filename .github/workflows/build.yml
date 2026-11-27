@@ -49,29 +49,3 @@ jobs:
           path: Folio.ipa
           retention-days: 30
 
-      - name: Build for simulator
-        continue-on-error: true
-        run: |
-          xcodebuild \
-            -project Folio.xcodeproj \
-            -scheme Folio \
-            -configuration Release \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build-sim \
-            CODE_SIGN_IDENTITY="-" \
-            build > xcodebuild-sim.log 2>&1 || true
-          grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild-sim.log | head -n 40
-
-      - name: Take simulator screenshots
-        continue-on-error: true
-        timeout-minutes: 22
-        run: bash scripts/screenshots.sh
-
-      - uses: actions/upload-artifact@v5
-        if: always()
-        with:
-          name: screenshots
-          path: shots
-          if-no-files-found: ignore
-          retention-days: 14
