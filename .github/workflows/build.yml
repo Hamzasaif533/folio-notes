@@ -65,7 +65,7 @@ jobs:
 
       - name: Take simulator screenshots
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 22
         run: bash scripts/screenshots.sh
 
       - uses: actions/upload-artifact@v5

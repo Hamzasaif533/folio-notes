@@ -78,9 +78,19 @@ struct Notebook: Identifiable, Codable, Hashable {
     // Optional so libraries saved by version 1.0 still load.
     var starred: Bool? = nil
     var trashedAt: Date? = nil
+    // Added in 1.2: nil means a normal paged notebook.
+    var kind: NotebookKind? = nil
 
     var isStarred: Bool { starred ?? false }
     var isTrashed: Bool { trashedAt != nil }
+    var isCanvas: Bool { kind == .canvas }
+}
+
+enum NotebookKind: String, Codable {
+    /// Pages stacked vertically, like a paper notebook.
+    case paged
+    /// One endless whiteboard you can scroll and zoom in every direction.
+    case canvas
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {

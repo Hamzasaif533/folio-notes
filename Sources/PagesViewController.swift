@@ -31,6 +31,11 @@ final class PageView: UIView {
         canvas.contentInsetAdjustmentBehavior = .never
         canvas.minimumZoomScale = 0.05
         canvas.maximumZoomScale = 20
+        // The page itself never pans or pinches on its own: the notebook's scroll
+        // view does that. (A pinch landing on the page used to zoom only the ink,
+        // which made the writing slide away from the lines.)
+        canvas.panGestureRecognizer.isEnabled = false
+        canvas.pinchGestureRecognizer?.isEnabled = false
         // Keep ink colours exactly as chosen, even when the iPad is in dark mode.
         canvas.overrideUserInterfaceStyle = .light
         canvas.drawing = drawing
@@ -83,11 +88,12 @@ final class PageView: UIView {
 }
 
 /// The scrolling stack of pages inside a notebook.
-final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanvasViewDelegate {
-    private let store: LibraryStore
-    private(set) var notebook: Notebook
-
+final class PagesViewController: DrawingSurfaceController, UIScrollViewDelegate {
     private let scrollView = UIScrollView()
+    private lazy var canvasDelegate = CanvasEvents(
+        changed: { [weak self] c in self?.drawingChanged(c) },
+        began: { [weak self] in self?.toolUseBegan() },
+        ended: { [weak self] in self?.toolUseEnded() })
     private let contentView = UIView()
     private(set) var pageViews: [PageView] = []
 
@@ -97,32 +103,16 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
     private var isBaking = false
     private(set) var currentPage = 0
 
-    private let undo = UndoManager()
-    override var undoManager: UndoManager? { undo }
-
     private var saveTasks: [UUID: Task<Void, Never>] = [:]
     private var dirty: Set<UUID> = []
-
-    private var tool: PKTool = PKInkingTool(.pen, color: .black, width: 3)
-    private var inputMode: DrawingInput = .auto
-
-    var onPageChanged: ((Int, Int) -> Void)?
-    var onUndoChanged: ((Bool, Bool) -> Void)?
 
     /// Pages fill the screen width edge to edge, with a small gap between them.
     static let marginUnits: CGFloat = 0
     static let gapUnits: CGFloat = 14
-    private var rulerOn = false
     private var minZoom: CGFloat { fitZoom * 0.5 }
     private var maxZoom: CGFloat { fitZoom * 4 }
 
-    init(store: LibraryStore, notebook: Notebook) {
-        self.store = store
-        self.notebook = notebook
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
+    override var scrollingView: UIScrollView? { scrollView }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -136,30 +126,22 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         scrollView.delaysContentTouches = false
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.alwaysBounceVertical = true
+        // Real values are set in layoutPages; set early so the pinch recogniser exists for palm rejection.
+        scrollView.minimumZoomScale = 0.5
+        scrollView.maximumZoomScale = 4
         view.addSubview(scrollView)
         scrollView.addSubview(contentView)
 
         for pid in notebook.pages {
             pageViews.append(makePage(pid))
         }
-
-        let nc = NotificationCenter.default
-        nc.addObserver(self, selector: #selector(undoStateChanged), name: .NSUndoManagerDidCloseUndoGroup, object: undo)
-        nc.addObserver(self, selector: #selector(undoStateChanged), name: .NSUndoManagerDidUndoChange, object: undo)
-        nc.addObserver(self, selector: #selector(undoStateChanged), name: .NSUndoManagerDidRedoChange, object: undo)
-        nc.addObserver(self, selector: #selector(appWillResign), name: UIApplication.willResignActiveNotification, object: nil)
-        applyInputMode()
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        saveAll()
+        installPalmRejection()
     }
 
     private func makePage(_ id: UUID) -> PageView {
         let pv = PageView(pageId: id, template: notebook.template, paper: notebook.paper,
                           drawing: store.loadDrawing(notebookId: notebook.id, pageId: id))
-        pv.canvas.delegate = self
+        pv.canvas.delegate = canvasDelegate
         pv.canvas.tool = tool
         pv.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
         pv.canvas.isRulerActive = rulerOn
@@ -184,6 +166,7 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         layoutPages()
         scrollTo(page: anchor, animated: false)
         reportPage(force: true)
+        reportZoom()
     }
 
     private func layoutPages() {
@@ -215,12 +198,14 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { contentView }
 
-    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+    func scrollViewDidZoom(_ sv: UIScrollView) {
+        guard sv === scrollView else { return }
         updateInsets()
+        reportZoom()
     }
 
     func scrollViewDidEndZooming(_ sv: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        guard !isBaking, abs(scale - 1) > 0.001 else { return }
+        guard sv === scrollView, !isBaking, abs(scale - 1) > 0.001 else { return }
         isBaking = true
         let offset = sv.contentOffset
         var newZoom = min(max(docZoom * scale, minZoom), maxZoom)
@@ -232,6 +217,25 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         sv.contentOffset = clamped(CGPoint(x: offset.x * ratio, y: offset.y * ratio))
         isBaking = false
         reportPage(force: true)
+        reportZoom()
+    }
+
+    override func resetZoom() {
+        guard abs(docZoom - fitZoom) > 0.001 || abs(scrollView.zoomScale - 1) > 0.001 else { return }
+        let page = currentPage
+        isBaking = true
+        scrollView.zoomScale = 1
+        docZoom = fitZoom
+        layoutPages()
+        isBaking = false
+        scrollTo(page: page, animated: false)
+        reportPage(force: true)
+        reportZoom()
+    }
+
+    private func reportZoom() {
+        let z = docZoom * scrollView.zoomScale / max(fitZoom, 0.001)
+        onZoomChanged?(Int((z * 100).rounded()))
     }
 
     private func clamped(_ p: CGPoint) -> CGPoint {
@@ -241,8 +245,8 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         return CGPoint(x: min(max(p.x, -inset.left), maxX), y: min(max(p.y, -inset.top), maxY))
     }
 
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard !isBaking else { return }
+    func scrollViewDidScroll(_ sv: UIScrollView) {
+        guard sv === scrollView, !isBaking else { return }
         reportPage(force: false)
     }
 
@@ -260,56 +264,27 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
 
     func scrollTo(page: Int, animated: Bool) {
         guard pageViews.indices.contains(page) else { return }
-        let y = CGFloat(page) * (TemplateRenderer.pageSize.height + Self.gapUnits) * docZoom
+        let y = CGFloat(page) * (TemplateRenderer.pageSize.height + Self.gapUnits) * docZoom * scrollView.zoomScale
         scrollView.setContentOffset(clamped(CGPoint(x: scrollView.contentOffset.x, y: y)), animated: animated)
     }
 
     // MARK: Tools
 
-    func setTool(_ newTool: PKTool) {
-        tool = newTool
-        for pv in pageViews { pv.canvas.tool = newTool }
+    override func applyTool() {
+        for pv in pageViews { pv.canvas.tool = tool }
     }
 
-    func setRuler(_ on: Bool) {
-        guard on != rulerOn else { return }
-        rulerOn = on
-        for pv in pageViews { pv.canvas.isRulerActive = on }
+    override func applyRuler() {
+        for pv in pageViews { pv.canvas.isRulerActive = rulerOn }
     }
 
-    func setInputMode(_ mode: DrawingInput) {
-        guard mode != inputMode else { return }
-        inputMode = mode
-        applyInputMode()
+    override func applyDrawingPolicy(fingerDraws: Bool) {
+        for pv in pageViews { pv.canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly }
     }
-
-    private var fingerDraws: Bool {
-        switch inputMode {
-        case .anyInput: return true
-        case .pencilOnly: return false
-        case .auto: return !UIPencilInteraction.prefersPencilOnlyDrawing
-        }
-    }
-
-    private func applyInputMode() {
-        let finger = fingerDraws
-        for pv in pageViews { pv.canvas.drawingPolicy = finger ? .anyInput : .pencilOnly }
-        // When the finger draws, scroll with two fingers instead.
-        scrollView.panGestureRecognizer.minimumNumberOfTouches = finger ? 2 : 1
-    }
-
-    // MARK: Undo
-
-    @objc private func undoStateChanged() {
-        onUndoChanged?(undo.canUndo, undo.canRedo)
-    }
-
-    func performUndo() { if undo.canUndo { undo.undo() } }
-    func performRedo() { if undo.canRedo { undo.redo() } }
 
     // MARK: Saving
 
-    func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+    private func drawingChanged(_ canvasView: PKCanvasView) {
         guard let pv = pageViews.first(where: { $0.canvas === canvasView }) else { return }
         dirty.insert(pv.pageId)
         saveTasks[pv.pageId]?.cancel()
@@ -329,7 +304,7 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         store.touch(notebook.id)
     }
 
-    func saveAll() {
+    override func saveAll() {
         for (_, t) in saveTasks { t.cancel() }
         saveTasks.removeAll()
         for pid in dirty {
@@ -341,8 +316,6 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         dirty.removeAll()
     }
 
-    @objc private func appWillResign() { saveAll() }
-
     // MARK: Pages
 
     func addPage() {
@@ -353,6 +326,13 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
         let pv = makePage(pid)
         pageViews.insert(pv, at: min(at, pageViews.count))
         layoutPages()
+        // Slide the new page in.
+        pv.alpha = 0
+        pv.transform = CGAffineTransform(translationX: 0, y: 40).scaledBy(x: 0.96, y: 0.96)
+        UIView.animate(withDuration: 0.45, delay: 0.05, usingSpringWithDamping: 0.82, initialSpringVelocity: 0) {
+            pv.alpha = 1
+            pv.transform = .identity
+        }
         scrollTo(page: at, animated: true)
         reportPage(force: true)
     }
@@ -382,8 +362,9 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
     }
 
     func jump(to page: Int) {
-        scrollTo(page: page, animated: false)
-        reportPage(force: true)
+        scrollTo(page: page, animated: true)
+        currentPage = page
+        onPageChanged?(page, pageViews.count)
     }
 
     func applyPaper(template: PageTemplate, paper: PaperColor) {
@@ -403,5 +384,16 @@ final class PagesViewController: UIViewController, UIScrollViewDelegate, PKCanva
     func drawingsForExport() -> [PKDrawing] {
         saveAll()
         return pageViews.map { $0.canvas.drawing }
+    }
+
+    /// Small preview of a page's ink (the template is drawn separately).
+    func thumbnail(of index: Int, width: CGFloat) -> UIImage? {
+        guard pageViews.indices.contains(index) else { return nil }
+        let rect = CGRect(origin: .zero, size: TemplateRenderer.pageSize)
+        var image: UIImage?
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            image = pageViews[index].canvas.drawing.image(from: rect, scale: width / rect.width * 2)
+        }
+        return image
     }
 }

@@ -101,7 +101,11 @@ enum DrawingInput: String, Codable, CaseIterable, Identifiable {
 /// The current tool and every pen setting, remembered between launches.
 @MainActor
 final class ToolState: ObservableObject {
-    @Published var tool: EditorTool = .pen
+    @Published var tool: EditorTool = .pen {
+        didSet { if oldValue != .eraser && oldValue != tool { lastDrawingTool = oldValue } }
+    }
+    /// The tool to go back to after a Pencil double-tap switched to the eraser.
+    private var lastDrawingTool: EditorTool = .pen
     @Published var pen: PenPreset { didSet { save() } }
     @Published var highlighter: PenPreset { didSet { save() } }
     @Published var eraserMode: EraserMode { didSet { save() } }
@@ -136,6 +140,8 @@ final class ToolState: ObservableObject {
         var highlighterQuickColors: [String]?
         var highlighterQuickSizes: [CGFloat]?
         var eraserQuickSizes: [CGFloat]?
+        // Added in 1.2.
+        var palmMigrated: Bool?
     }
 
     private static let key = "folio.toolstate.v1"
@@ -150,7 +156,8 @@ final class ToolState: ObservableObject {
             eraserWidth = s.eraserWidth
             favorites = s.favorites
             recentColors = s.recentColors
-            inputMode = s.inputMode
+            // 1.2: Apple Pencil only (palm rejection) is now the default.
+            inputMode = (s.palmMigrated == nil && s.inputMode == .auto) ? .pencilOnly : s.inputMode
             penQuickColors = Self.three(s.penQuickColors, Self.defaultPenColors)
             penQuickSizes = Self.three(s.penQuickSizes, Self.defaultPenSizes)
             highlighterQuickColors = Self.three(s.highlighterQuickColors, Self.defaultHighlighterColors)
@@ -173,9 +180,10 @@ final class ToolState: ObservableObject {
                 PenPreset(kind: .fountain, colorHex: "#1E7F4F", width: 5)
             ]
             recentColors = []
-            inputMode = .auto
+            inputMode = .pencilOnly
         }
         loading = false
+        save()
     }
 
     private func save() {
@@ -186,7 +194,8 @@ final class ToolState: ObservableObject {
                       penQuickColors: penQuickColors, penQuickSizes: penQuickSizes,
                       highlighterQuickColors: highlighterQuickColors,
                       highlighterQuickSizes: highlighterQuickSizes,
-                      eraserQuickSizes: eraserQuickSizes)
+                      eraserQuickSizes: eraserQuickSizes,
+                      palmMigrated: true)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }
@@ -225,6 +234,20 @@ final class ToolState: ObservableObject {
 
     func removeFavorite(_ id: UUID) {
         favorites.removeAll { $0.id == id }
+    }
+
+    /// Apple Pencil double-tap: switch to the eraser, or back to the previous tool.
+    func toggleEraser() {
+        tool = tool == .eraser ? lastDrawingTool : .eraser
+    }
+
+    var toolTitle: String {
+        switch tool {
+        case .pen: return pen.kind.title
+        case .highlighter: return "Highlighter"
+        case .eraser: return "Eraser"
+        case .lasso: return "Lasso"
+        }
     }
 
     func selectFavorite(_ preset: PenPreset) {

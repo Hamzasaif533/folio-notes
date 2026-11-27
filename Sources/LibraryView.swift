@@ -15,6 +15,7 @@ struct LibraryView: View {
     @State private var folderSheet: FolderSheetMode?
     @State private var deletingFolder: Folder?
     @State private var didRunDemo = false
+    @Namespace private var zoomNS
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
@@ -27,8 +28,10 @@ struct LibraryView: View {
         } detail: {
             NavigationStack {
                 NotesGridView(selection: $selection,
+                              zoomNS: zoomNS,
                               onOpen: open,
-                              onNewNotebook: { notebookSheet = .create(folderId: $0) },
+                              onNewNotebook: { notebookSheet = .create(folderId: $0, kind: $1) },
+                              onQuickNote: quickNote,
                               onNewFolder: { folderSheet = .create },
                               onEditNotebook: { notebookSheet = .edit($0) },
                               onEditFolder: { folderSheet = .edit($0) },
@@ -40,6 +43,7 @@ struct LibraryView: View {
             EditorView(notebook: nb)
                 .environmentObject(store)
                 .environmentObject(tools)
+                .zoomTransition(id: nb.id, in: zoomNS)
         }
         .sheet(item: $notebookSheet) { mode in
             NotebookSheet(mode: mode) { nb in
@@ -67,6 +71,16 @@ struct LibraryView: View {
         openNotebook = store.notebook(nb.id) ?? nb
     }
 
+    /// Creates a notebook (or canvas) with default settings and opens it straight away.
+    private func quickNote(_ kind: NotebookKind) {
+        var folderId: UUID?
+        if case .folder(let id) = selection { folderId = id }
+        let nb = store.createNotebook(title: "", folderId: folderId,
+                                      cover: CoverStyle(paletteIndex: Int.random(in: 0..<Theme.coverPalettes.count), pattern: .plain),
+                                      template: kind == .canvas ? .dotted : .ruled, paper: .white, kind: kind)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { open(nb) }
+    }
+
     private func removeFolder(_ f: Folder, notebooks: Bool) {
         if selection == .folder(f.id) { selection = .all }
         store.deleteFolder(f.id, deleteNotebooks: notebooks)
@@ -80,6 +94,9 @@ struct LibraryView: View {
         if DemoMode.showFolders { selection = .folders }
         if DemoMode.openFirst, let first = store.activeNotebooks.first(where: { $0.title == DemoMode.firstTitle }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(first) }
+        }
+        if DemoMode.openCanvas, let board = store.activeNotebooks.first(where: { $0.title == DemoMode.canvasTitle }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(board) }
         }
     }
 }
@@ -111,7 +128,7 @@ struct SidebarView: View {
                 }
 
                 HStack(spacing: 14) {
-                    Button { selection = .folders } label: {
+                    Button { withAnimation(.snappy(duration: 0.28)) { selection = .folders } } label: {
                         Text("Folders")
                             .font(.system(size: 25, weight: .regular, design: .serif))
                             .foregroundStyle(selection == .folders ? Theme.accent : Color.primary)
@@ -149,11 +166,13 @@ struct SidebarView: View {
                     }
                     ForEach(store.folders) { f in
                         folderRow(f)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
                     }
                 }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 30)
+            .animation(.spring(response: 0.4, dampingFraction: 0.85), value: store.folders.map(\.id))
         }
         .scrollIndicators(.hidden)
         .background(Theme.sidebarPanel.ignoresSafeArea())
@@ -161,7 +180,7 @@ struct SidebarView: View {
 
     private func tile(_ item: SidebarItem, title: String, icon: String, tint: Color, count: Int) -> some View {
         let selected = selection == item
-        return Button { selection = item } label: {
+        return Button { withAnimation(.snappy(duration: 0.28)) { selection = item } } label: {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top) {
                     Image(systemName: icon)
@@ -185,13 +204,13 @@ struct SidebarView: View {
                 .fill(selected ? Theme.accent : Theme.tileFill))
             .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle(scale: 0.95))
     }
 
     private func folderRow(_ f: Folder) -> some View {
         let selected = selection == .folder(f.id)
         let color = Color(hex: Theme.folderColors[abs(f.colorIndex) % Theme.folderColors.count])
-        return Button { selection = .folder(f.id) } label: {
+        return Button { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } } label: {
             HStack(spacing: 12) {
                 Image(systemName: f.icon)
                     .font(.system(size: 14, weight: .semibold))
@@ -226,14 +245,18 @@ struct SidebarView: View {
 struct NotesGridView: View {
     @EnvironmentObject var store: LibraryStore
     @Binding var selection: SidebarItem
+    var zoomNS: Namespace.ID? = nil
     let onOpen: (Notebook) -> Void
-    let onNewNotebook: (UUID?) -> Void
+    let onNewNotebook: (UUID?, NotebookKind) -> Void
+    let onQuickNote: (NotebookKind) -> Void
     let onNewFolder: () -> Void
     let onEditNotebook: (Notebook) -> Void
     let onEditFolder: (Folder) -> Void
     let onDeleteFolder: (Folder) -> Void
 
     @AppStorage("folio.sort") private var sortRaw: String = SortOrder.modified.rawValue
+    @AppStorage("folio.largeTiles") private var largeTiles = false
+    @State private var showNewMenu = false
     @State private var query = ""
     @State private var renaming: Notebook?
     @State private var renameText = ""
@@ -279,28 +302,37 @@ struct NotesGridView: View {
                     .lineLimit(1)
                     .padding(.top, 2)
 
-                if selection == .folders && query.isEmpty {
-                    foldersGrid
-                } else if items.isEmpty {
-                    emptyState
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 158, maximum: 196), spacing: 30)],
-                              alignment: .leading, spacing: 36) {
-                        ForEach(items) { nb in
-                            Button {
-                                if !nb.isTrashed { onOpen(nb) }
-                            } label: {
-                                NotebookTile(notebook: nb)
+                Group {
+                    if selection == .folders && query.isEmpty {
+                        foldersGrid
+                    } else if items.isEmpty {
+                        emptyState
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: largeTiles ? 210 : 158,
+                                                               maximum: largeTiles ? 260 : 196), spacing: 30)],
+                                  alignment: .leading, spacing: 36) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { i, nb in
+                                Button {
+                                    if !nb.isTrashed { onOpen(nb) }
+                                } label: {
+                                    NotebookTile(notebook: nb, zoomNS: zoomNS)
+                                }
+                                .buttonStyle(PressableStyle(scale: 0.95))
+                                .contextMenu { menu(for: nb) }
+                                .staggeredAppear(i)
+                                .transition(.scale(scale: 0.85).combined(with: .opacity))
                             }
-                            .buttonStyle(.plain)
-                            .contextMenu { menu(for: nb) }
                         }
                     }
                 }
+                .id(selection)
+                .transition(.opacity.combined(with: .offset(y: 10)))
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(.spring(response: 0.42, dampingFraction: 0.86), value: items.map(\.id))
+            .animation(.spring(response: 0.42, dampingFraction: 0.86), value: largeTiles)
         }
         .background(Theme.libraryBackground.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
@@ -313,7 +345,14 @@ struct NotesGridView: View {
                 } else if selection == .folders {
                     ProminentButton(title: "New Folder", systemImage: "plus", action: onNewFolder)
                 } else {
-                    ProminentButton(title: "New", systemImage: "plus") { onNewNotebook(currentFolderId) }
+                    ProminentButton(title: "New", systemImage: "plus") { showNewMenu = true }
+                        .popover(isPresented: $showNewMenu, arrowEdge: .top) {
+                            NewMenu(onNotebook: { pick { onNewNotebook(currentFolderId, .paged) } },
+                                    onCanvas: { pick { onNewNotebook(currentFolderId, .canvas) } },
+                                    onFolder: { pick(onNewFolder) },
+                                    onQuickNote: { pick { onQuickNote(.paged) } },
+                                    onQuickCanvas: { pick { onQuickNote(.canvas) } })
+                        }
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -321,9 +360,19 @@ struct NotesGridView: View {
                     Picker("Sort By", selection: $sortRaw) {
                         ForEach(SortOrder.allCases) { s in Text(s.title).tag(s.rawValue) }
                     }
+                    Divider()
+                    Picker("Size", selection: $largeTiles) {
+                        Label("Large Notebooks", systemImage: "square.grid.2x2").tag(true)
+                        Label("Small Notebooks", systemImage: "square.grid.3x3").tag(false)
+                    }
                 } label: {
                     Label("Options", systemImage: "ellipsis")
                 }
+            }
+        }
+        .onAppear {
+            if DemoMode.showNew {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showNewMenu = true }
             }
         }
         .alert("Rename Notebook", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -356,18 +405,25 @@ struct NotesGridView: View {
         }
     }
 
+    /// Closes the New menu first, then runs the action (so sheets don't clash with the popover).
+    private func pick(_ action: @escaping () -> Void) {
+        showNewMenu = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: action)
+    }
+
     private var foldersGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 28)],
                   alignment: .leading, spacing: 30) {
-            ForEach(store.folders) { f in
-                Button { selection = .folder(f.id) } label: {
+            ForEach(Array(store.folders.enumerated()), id: \.element.id) { i, f in
+                Button { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } } label: {
                     FolderCard(folder: f, notebooks: store.notebooks(in: f.id))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle(scale: 0.95))
                 .contextMenu {
                     Button { onEditFolder(f) } label: { Label("Edit Folder", systemImage: "pencil") }
                     Button(role: .destructive) { onDeleteFolder(f) } label: { Label("Delete Folder", systemImage: "trash") }
                 }
+                .staggeredAppear(i)
             }
             Button(action: onNewFolder) {
                 VStack(spacing: 10) {
@@ -376,11 +432,11 @@ struct NotesGridView: View {
                 }
                 .foregroundStyle(Theme.action)
                 .frame(maxWidth: .infinity)
-                .frame(height: 150)
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .frame(height: 170)
+                .background(RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .strokeBorder(Theme.action.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableStyle(scale: 0.95))
         }
     }
 
@@ -394,7 +450,7 @@ struct NotesGridView: View {
                 .foregroundStyle(.secondary)
             if selection != .trash && selection != .starred && query.isEmpty {
                 Button {
-                    onNewNotebook(currentFolderId)
+                    onNewNotebook(currentFolderId, .paged)
                 } label: {
                     Label("New Notebook", systemImage: "plus").fontWeight(.semibold)
                 }
@@ -439,6 +495,70 @@ struct NotesGridView: View {
             Divider()
             Button(role: .destructive) { store.moveToTrash(nb.id) } label: { Label("Move to Trash", systemImage: "trash") }
         }
+    }
+}
+
+/// The "+ New" popover: big tiles for Notebook / Canvas / Folder, then quick actions.
+struct NewMenu: View {
+    let onNotebook: () -> Void
+    let onCanvas: () -> Void
+    let onFolder: () -> Void
+    let onQuickNote: () -> Void
+    let onQuickCanvas: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                tile("Notebook", "book.closed", onNotebook)
+                tile("Canvas", "infinity", onCanvas)
+                tile("Folder", "folder.badge.plus", onFolder)
+            }
+            VStack(spacing: 0) {
+                row("Quick Note", "square.and.pencil", onQuickNote)
+                Divider().padding(.leading, 52)
+                row("Quick Canvas", "scribble.variable", onQuickCanvas)
+            }
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.07)))
+        }
+        .padding(14)
+        .frame(width: 380)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private func tile(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 24, weight: .regular))
+                    .foregroundStyle(Theme.action)
+                Text(title)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.primary)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 92)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.07)))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(PressableStyle(scale: 0.94))
+    }
+
+    private func row(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: icon)
+                    .font(.system(size: 19))
+                    .foregroundStyle(Theme.action)
+                    .frame(width: 24)
+                Text(title).font(.system(size: 17))
+                Spacer()
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 14)
+            .frame(height: 54)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -127,9 +127,10 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func createNotebook(title: String, folderId: UUID?, cover: CoverStyle,
-                        template: PageTemplate, paper: PaperColor) -> Notebook {
-        let nb = Notebook(title: title.isEmpty ? "Untitled" : title, folderId: folderId,
-                          cover: cover, template: template, paper: paper, pages: [UUID()])
+                        template: PageTemplate, paper: PaperColor, kind: NotebookKind = .paged) -> Notebook {
+        var nb = Notebook(title: title.isEmpty ? (kind == .canvas ? "Untitled Canvas" : "Untitled") : title,
+                          folderId: folderId, cover: cover, template: template, paper: paper, pages: [UUID()])
+        nb.kind = kind == .canvas ? .canvas : nil
         notebooks.append(nb)
         persist()
         return nb

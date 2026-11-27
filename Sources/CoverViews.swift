@@ -143,74 +143,131 @@ struct FolderShape: Shape {
     }
 }
 
-/// A folder card: coloured folder with the first notebooks peeking out of it.
+/// A frosted-glass folder: the notebooks inside stick out of the top and show
+/// through the glass front, blurred, so you can see what's in the folder.
 struct FolderCard: View {
     let folder: Folder
     let notebooks: [Notebook]
+    @Environment(\.colorScheme) private var scheme
+
+    private var base: Color { Color(hex: Theme.folderColors[abs(folder.colorIndex) % Theme.folderColors.count]) }
 
     var body: some View {
-        let base = Color(hex: Theme.folderColors[abs(folder.colorIndex) % Theme.folderColors.count])
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(spacing: 12) {
             ZStack(alignment: .bottom) {
+                // Back of the folder, with the tab.
                 FolderShape()
-                    .fill(base.opacity(0.55))
-                HStack(spacing: -22) {
-                    ForEach(Array(notebooks.prefix(3).enumerated()), id: \.element.id) { i, nb in
-                        NotebookCoverView(cover: nb.cover)
-                            .frame(width: 54, height: 72)
-                            .rotationEffect(.degrees(Double(i - 1) * 7))
-                            .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 1)
+                    .fill(LinearGradient(colors: [base.opacity(scheme == .dark ? 0.55 : 0.42),
+                                                  base.opacity(scheme == .dark ? 0.35 : 0.22)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .overlay(FolderShape().stroke(Color.white.opacity(scheme == .dark ? 0.12 : 0.5), lineWidth: 1))
+
+                contents
+                    .frame(height: 150, alignment: .top)
+                    .padding(.top, 20)
+
+                // Frosted glass front.
+                let front = RoundedRectangle(cornerRadius: 22, style: .continuous)
+                front
+                    .fill(.ultraThinMaterial)
+                    .overlay(front.fill(base.opacity(scheme == .dark ? 0.22 : 0.14)))
+                    .overlay(front.fill(LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.10 : 0.45),
+                                                                Color.white.opacity(0.0)],
+                                                       startPoint: .top, endPoint: .bottom)))
+                    .overlay(front.strokeBorder(LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.35 : 0.9),
+                                                                        Color.white.opacity(0.1)],
+                                                               startPoint: .top, endPoint: .bottom), lineWidth: 1))
+                    .frame(height: 112)
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: folder.icon)
+                            .font(.system(size: 30, weight: .semibold))
+                            .foregroundStyle(LinearGradient(colors: [base, base.opacity(0.75)],
+                                                            startPoint: .top, endPoint: .bottom))
+                            .shadow(color: base.opacity(0.35), radius: 6, y: 3)
+                            .padding(16)
                     }
-                    if notebooks.isEmpty {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.white.opacity(0.85))
-                            .frame(width: 70, height: 64)
-                            .rotationEffect(.degrees(-4))
-                    }
-                }
-                .offset(y: -42)
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(base)
-                    .overlay(RoundedRectangle(cornerRadius: 14)
-                        .fill(LinearGradient(colors: [.white.opacity(0.12), .black.opacity(0.10)],
-                                             startPoint: .top, endPoint: .bottom)))
-                    .frame(height: 92)
                     .overlay(alignment: .bottomLeading) {
-                        HStack {
-                            Image(systemName: folder.icon)
-                                .font(.system(size: 22, weight: .semibold))
-                            Spacer()
-                            Text("\(notebooks.count)")
-                                .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.white.opacity(0.25)))
+                        if let latest = notebooks.first {
+                            Text(latest.title)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .frame(maxWidth: 120, alignment: .leading)
+                                .padding(.leading, 16)
+                                .padding(.bottom, 18)
                         }
-                        .foregroundStyle(.white)
-                        .padding(14)
                     }
-                    .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: -1)
+                    .shadow(color: .black.opacity(scheme == .dark ? 0.4 : 0.10), radius: 12, x: 0, y: 6)
             }
-            .frame(height: 150)
-            Text(folder.name)
-                .font(.headline)
-                .lineLimit(1)
-            Text(notebooks.count == 1 ? "1 notebook" : "\(notebooks.count) notebooks")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .frame(height: 170)
+
+            HStack(spacing: 7) {
+                Text(folder.name)
+                    .font(.system(size: 17, weight: .medium))
+                    .lineLimit(1)
+                Text("\(notebooks.count)")
+                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+            }
+            .frame(maxWidth: .infinity)
         }
         .contentShape(Rectangle())
+    }
+
+    /// The first few notebooks, fanned out; their lower half sits behind the glass.
+    @ViewBuilder
+    private var contents: some View {
+        if notebooks.isEmpty {
+            ZStack {
+                ForEach(0..<2, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(scheme == .dark ? 0.75 : 0.95))
+                        .frame(width: 84, height: 100)
+                        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+                        .rotationEffect(.degrees(i == 0 ? -6 : 5))
+                        .offset(x: i == 0 ? -14 : 14)
+                }
+            }
+        } else {
+            HStack(spacing: -30) {
+                ForEach(Array(notebooks.prefix(3).enumerated()), id: \.element.id) { i, nb in
+                    NotebookCoverView(cover: nb.cover)
+                        .frame(width: 66, height: 88)
+                        .rotationEffect(.degrees(notebooks.count == 1 ? -3 : Double(i - 1) * 8))
+                        .offset(y: i == 1 ? -6 : 0)
+                        .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 2)
+                        .zIndex(Double(i == 1 ? 3 : 3 - i))
+                }
+            }
+        }
     }
 }
 
 struct NotebookTile: View {
     let notebook: Notebook
+    var zoomNS: Namespace.ID? = nil
 
     var body: some View {
         VStack(spacing: 4) {
             NotebookCoverView(cover: notebook.cover)
                 .aspectRatio(0.74, contentMode: .fit)
+                .zoomSource(id: notebook.id, in: zoomNS)
                 .shadow(color: .black.opacity(0.22), radius: 7, x: 0, y: 4)
+                .overlay(alignment: .bottomTrailing) {
+                    if notebook.isCanvas {
+                        Image(systemName: "infinity")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.black.opacity(0.45)))
+                            .padding(8)
+                            .accessibilityLabel("Infinite canvas")
+                    }
+                }
                 .overlay(alignment: .topTrailing) {
                     if notebook.isStarred {
                         Image(systemName: "star.fill")

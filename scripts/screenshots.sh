@@ -37,24 +37,29 @@ rotate() {
 
 run_set() {
   local suffix=$1
-  shot "1-library-$suffix"
-  shot "2-folders-$suffix" -FolioShowFolders
-  shot "3-editor-$suffix" -FolioOpenFirst
-  shot "4-pen-settings-$suffix" -FolioOpenFirst -FolioShowPen
-  shot "5-focus-$suffix" -FolioOpenFirst -FolioFocus
+  shot "01-library-$suffix"
+  shot "02-folders-$suffix" -FolioShowFolders
+  shot "03-editor-$suffix" -FolioOpenFirst
+  shot "04-pen-settings-$suffix" -FolioOpenFirst -FolioShowPen
+  shot "05-squeeze-$suffix" -FolioOpenFirst -FolioSqueeze
+  shot "06-canvas-$suffix" -FolioOpenCanvas
 }
 
 xcrun simctl ui "$DEVICE" appearance light
 run_set "portrait-light"
+shot "07-new-menu-portrait-light" -FolioShowNew
+shot "08-sidebar-portrait-light" -FolioOpenFirst -FolioSidebar
+shot "09-dock-left-portrait-light" -FolioOpenFirst -FolioDockLeft
+shot "10-focus-portrait-light" -FolioOpenFirst -FolioFocus
 xcrun simctl ui "$DEVICE" appearance dark
 run_set "portrait-dark"
 
 rotate
 xcrun simctl ui "$DEVICE" appearance dark
-shot "1-library-landscape-dark"
-shot "3-editor-landscape-dark" -FolioOpenFirst
+shot "01-library-landscape-dark"
+shot "03-editor-landscape-dark" -FolioOpenFirst
 xcrun simctl ui "$DEVICE" appearance light
-shot "1-library-landscape-light"
-shot "3-editor-landscape-light" -FolioOpenFirst
+shot "02-folders-landscape-light" -FolioShowFolders
+shot "03-editor-landscape-light" -FolioOpenFirst -FolioDockBottom
 
 ls -la shots

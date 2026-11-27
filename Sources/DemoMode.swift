@@ -11,7 +11,17 @@ enum DemoMode {
     static var focus: Bool { args.contains("-FolioFocus") }
     static var showPen: Bool { args.contains("-FolioShowPen") }
     static var showFolders: Bool { args.contains("-FolioShowFolders") }
+    static var squeeze: Bool { args.contains("-FolioSqueeze") }
+    static var sidebar: Bool { args.contains("-FolioSidebar") }
+    static var openCanvas: Bool { args.contains("-FolioOpenCanvas") }
+    static var showNew: Bool { args.contains("-FolioShowNew") }
+    static var dock: ToolbarDock? {
+        if args.contains("-FolioDockLeft") { return .left }
+        if args.contains("-FolioDockBottom") { return .bottom }
+        return nil
+    }
     static let firstTitle = "Lecture Notes"
+    static let canvasTitle = "Whiteboard"
 
     @MainActor
     static func seedIfNeeded(_ store: LibraryStore) {
@@ -36,9 +46,19 @@ enum DemoMode {
             if title == firstTitle || title == "Journal" { store.setStarred(nb.id, true) }
             if title == firstTitle {
                 store.saveDrawing(sampleDrawing(), notebookId: nb.id, pageId: nb.pages[0])
+                if let p2 = store.insertPage(notebookId: nb.id, at: 1) {
+                    store.saveDrawing(sampleDrawing(), notebookId: nb.id, pageId: p2)
+                }
+                _ = store.insertPage(notebookId: nb.id, at: 2)
                 store.touch(nb.id)
             }
         }
+        let board = store.createNotebook(title: canvasTitle, folderId: projects.id,
+                                         cover: CoverStyle(paletteIndex: 7, pattern: .dots),
+                                         template: .dotted, paper: .white, kind: .canvas)
+        // Strokes around the middle of the board, where the canvas opens.
+        let mid = CGAffineTransform(translationX: 10000 - 360, y: 10000 - 400)
+        store.saveDrawing(sampleDrawing().transformed(using: mid), notebookId: board.id, pageId: board.pages[0])
     }
 
     /// A few strokes in different pens and colours, to check ink visibility.

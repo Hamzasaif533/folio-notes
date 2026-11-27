@@ -1,11 +1,11 @@
 import SwiftUI
 
 enum NotebookSheetMode: Identifiable {
-    case create(folderId: UUID?)
+    case create(folderId: UUID?, kind: NotebookKind)
     case edit(Notebook)
     var id: String {
         switch self {
-        case .create: return "create"
+        case .create(_, let kind): return "create-\(kind.rawValue)"
         case .edit(let nb): return nb.id.uuidString
         }
     }
@@ -27,6 +27,17 @@ struct NotebookSheet: View {
     private var isEdit: Bool {
         if case .edit = mode { return true }
         return false
+    }
+
+    private var isCanvas: Bool {
+        switch mode {
+        case .create(_, let kind): return kind == .canvas
+        case .edit(let nb): return (store.notebook(nb.id) ?? nb).isCanvas
+        }
+    }
+
+    private var templates: [PageTemplate] {
+        isCanvas ? [.blank, .grid, .dotted, .ruled] : PageTemplate.allCases
     }
 
     var body: some View {
@@ -90,10 +101,15 @@ struct NotebookSheet: View {
                         }
                     }
 
-                    SectionTitle(text: "Page Template")
+                    SectionTitle(text: isCanvas ? "Background" : "Page Template")
+                    if isCanvas {
+                        Label("An endless whiteboard: scroll and zoom out as far as you like.", systemImage: "infinity")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18), count: 6), spacing: 18) {
-                        ForEach(PageTemplate.allCases) { t in
-                            Button { template = t } label: {
+                        ForEach(templates) { t in
+                            Button { withAnimation(.snappy) { template = t } } label: {
                                 VStack(spacing: 6) {
                                     TemplateThumbnail(template: t, paper: paper)
                                         .overlay {
@@ -114,7 +130,7 @@ struct NotebookSheet: View {
                 }
                 .padding(26)
             }
-            .navigationTitle(isEdit ? "Cover & Paper" : "New Notebook")
+            .navigationTitle(isEdit ? "Cover & Paper" : (isCanvas ? "New Canvas" : "New Notebook"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -138,14 +154,16 @@ struct NotebookSheet: View {
             cover = current.cover
             template = current.template
             paper = current.paper
+        } else if isCanvas {
+            template = .dotted
         }
     }
 
     private func commit() {
         switch mode {
-        case .create(let folderId):
+        case .create(let folderId, let kind):
             let nb = store.createNotebook(title: title, folderId: folderId, cover: cover,
-                                          template: template, paper: paper)
+                                          template: template, paper: paper, kind: kind)
             dismiss()
             onCreate(nb)
         case .edit(let original):
