@@ -1,5 +1,7 @@
 import SwiftUI
 import PencilKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class EditorController: ObservableObject {
@@ -11,6 +13,7 @@ final class EditorController: ObservableObject {
     @Published var canUndo = false
     @Published var canRedo = false
     @Published var zoomPercent = 100
+    @Published var zoomBoxOpen = false
     /// Where Apple Pencil Pro was squeezed (opens the quick menu there).
     @Published var squeezePoint: CGPoint?
     @Published var doubleTaps = 0
@@ -21,6 +24,12 @@ struct SurfaceHost: UIViewControllerRepresentable {
     let store: LibraryStore
     let notebook: Notebook
     let tool: PKTool
+    let editorTool: EditorTool
+    let feel: InkFeel
+    let readOnly: Bool
+    let horizontal: Bool
+    let textColor: String
+    let textSize: CGFloat
     let inputMode: DrawingInput
     let ruler: Bool
     let controller: EditorController
@@ -28,7 +37,7 @@ struct SurfaceHost: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> DrawingSurfaceController {
         let vc: DrawingSurfaceController = notebook.isCanvas
             ? CanvasViewController(store: store, notebook: notebook)
-            : PagesViewController(store: store, notebook: notebook)
+            : PagesViewController(store: store, notebook: notebook, horizontal: horizontal)
         let ctrl = controller
         vc.onPageChanged = { i, n in
             DispatchQueue.main.async {
@@ -48,7 +57,7 @@ struct SurfaceHost: UIViewControllerRepresentable {
         vc.onPencilDoubleTap = { DispatchQueue.main.async { ctrl.doubleTaps += 1 } }
         vc.onPencilSqueeze = { p in
             DispatchQueue.main.async {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                withAnimation(.easeOut(duration: 0.18)) {
                     ctrl.squeezePoint = ctrl.squeezePoint == nil ? p : nil
                 }
             }
@@ -56,20 +65,29 @@ struct SurfaceHost: UIViewControllerRepresentable {
         vc.onDrawingStarted = {
             DispatchQueue.main.async {
                 guard ctrl.squeezePoint != nil else { return }
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { ctrl.squeezePoint = nil }
+                withAnimation(.easeOut(duration: 0.15)) { ctrl.squeezePoint = nil }
             }
         }
+        (vc as? PagesViewController)?.onZoomBox = { open in
+            DispatchQueue.main.async { ctrl.zoomBoxOpen = open }
+        }
         controller.surface = vc
-        vc.setTool(tool)
-        vc.setInputMode(inputMode)
-        vc.setRuler(ruler)
+        apply(to: vc)
         return vc
     }
 
     func updateUIViewController(_ vc: DrawingSurfaceController, context: Context) {
+        apply(to: vc)
+    }
+
+    private func apply(to vc: DrawingSurfaceController) {
         vc.setTool(tool)
         vc.setInputMode(inputMode)
         vc.setRuler(ruler)
+        vc.textColorHex = textColor
+        vc.textSize = textSize
+        vc.setMode(tool: editorTool, feel: feel, readOnly: readOnly)
+        (vc as? PagesViewController)?.setHorizontal(horizontal)
     }
 }
 
@@ -85,37 +103,78 @@ enum ToolbarDock: String, CaseIterable, Identifiable {
     var vertical: Bool { self == .left || self == .right }
 }
 
+/// The two floating bars, each docked to its own edge.
+private enum BarKind { case tools, colors }
+
+private enum EditorCover: String, Identifiable {
+    case scanner, cameraPage, cameraPhoto
+    var id: String { rawValue }
+}
+
 struct EditorView: View {
     @EnvironmentObject var store: LibraryStore
     @EnvironmentObject var tools: ToolState
     @Environment(\.dismiss) private var dismiss
     let notebook: Notebook
+    var onSwitch: (Notebook) -> Void = { _ in }
 
     @StateObject private var controller = EditorController()
     @AppStorage("folio.toolbarDock") private var dockRaw = ToolbarDock.top.rawValue
+    @AppStorage("folio.colorbarDock") private var colorDockRaw = ToolbarDock.top.rawValue
+    @AppStorage("folio.horizontalPages") private var horizontal = false
     @State private var showToolSettings = false
     @State private var focusMode = false
     @State private var showPaper = false
     @State private var showSidebar = false
+    @State private var showAllNotes = false
     @State private var confirmDeletePage = false
     @State private var shareItem: ShareItem?
+    @State private var dragBar: BarKind?
     @State private var dragOffset: CGSize = .zero
     @State private var dragTarget: ToolbarDock?
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
     @State private var showPageBadge = false
     @State private var badgeTask: Task<Void, Never>?
+    @State private var showAdd = false
+    @State private var showMore = false
+    @State private var showCustomize = false
+    @State private var readOnly = false
+    @State private var pageImageItem: PhotosPickerItem?
+    @State private var photoItem: PhotosPickerItem?
+    @State private var toolbarPhotoItem: PhotosPickerItem?
+    @State private var cover: EditorCover?
+    @State private var showImporter = false
+    @State private var showGoTo = false
+    @State private var goToText = ""
+    @State private var showOutline = false
+    @State private var outlineText = ""
+    @State private var showInfo = false
+    @State private var showEmojiPopover = false
+    @State private var showStickerPopover = false
     @Namespace private var toolNS
 
-    private var dock: ToolbarDock { ToolbarDock(rawValue: dockRaw) ?? .top }
+    private var toolsDock: ToolbarDock { ToolbarDock(rawValue: dockRaw) ?? .top }
+    private var colorsDock: ToolbarDock { ToolbarDock(rawValue: colorDockRaw) ?? .top }
     private var isCanvas: Bool { notebook.isCanvas }
+    private var currentNotebook: Notebook { store.notebook(notebook.id) ?? notebook }
+    private var currentPageId: UUID? {
+        let pages = currentNotebook.pages
+        return pages.indices.contains(controller.pageIndex) ? pages[controller.pageIndex] : nil
+    }
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                SurfaceHost(store: store, notebook: notebook, tool: tools.pkTool,
+                SurfaceHost(store: store, notebook: notebook, tool: tools.pkTool, editorTool: tools.tool,
+                            feel: tools.pen.inkFeel, readOnly: readOnly, horizontal: horizontal,
+                            textColor: tools.textColorHex, textSize: tools.textSize,
                             inputMode: tools.inputMode, ruler: tools.rulerActive, controller: controller)
                     .ignoresSafeArea()
+
+                if !isCanvas && !showSidebar {
+                    edgeSwipeArea
+                }
 
                 if focusMode {
                     focusExitButton
@@ -151,7 +210,7 @@ struct EditorView: View {
                         .frame(height: 36)
                         .background(Capsule().fill(Color.black.opacity(0.82)))
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, focusMode ? 14 : (dock == .top ? 128 : 70))
+                        .padding(.top, toastTop)
                         .transition(.move(edge: .top).combined(with: .opacity))
                         .allowsHitTesting(false)
                         .zIndex(11)
@@ -161,23 +220,83 @@ struct EditorView: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: focusMode)
-        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: showSidebar)
-        .animation(.spring(response: 0.34, dampingFraction: 0.8), value: toast)
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: focusMode)
+        .animation(.spring(response: 0.42, dampingFraction: 0.88), value: showSidebar)
+        .animation(.spring(response: 0.42, dampingFraction: 0.88), value: showAllNotes)
+        .animation(.easeOut(duration: 0.25), value: toast)
         .sheet(item: $shareItem) { item in
             ActivityView(items: [item.url])
         }
         .sheet(isPresented: $showPaper) {
-            PaperSheet(template: currentNotebook.template, paper: currentNotebook.paper) { t, p in
+            PaperSheet(template: currentNotebook.template, paper: currentNotebook.paper, isCanvas: isCanvas) { t, p in
                 controller.pages?.applyPaper(template: t, paper: p)
                 controller.board?.applyPaper(template: t, paper: p)
             }
+        }
+        .sheet(isPresented: $showCustomize) {
+            CustomizeToolbarSheet(isCanvas: isCanvas)
+                .environmentObject(tools)
+                .presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(item: $cover) { c in
+            switch c {
+            case .scanner:
+                DocumentScannerView { images in
+                    cover = nil
+                    addPages(images)
+                }
+                .ignoresSafeArea()
+            case .cameraPage, .cameraPhoto:
+                CameraPicker { image in
+                    cover = nil
+                    guard let image else { return }
+                    if c == .cameraPage { addPages([image]) } else { placePhoto(image) }
+                }
+                .ignoresSafeArea()
+            }
+        }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: FileImporter.types) { result in
+            guard case .success(let url) = result else { return }
+            let images = FileImporter.pages(from: url)
+            if isCanvas { images.first.map(placePhoto) } else { addPages(images) }
+        }
+        .alert("Go to Page", isPresented: $showGoTo) {
+            TextField("Page number", text: $goToText).keyboardType(.numberPad)
+            Button("Cancel", role: .cancel) {}
+            Button("Go") {
+                if let n = Int(goToText), n >= 1, n <= controller.pageCount { controller.pages?.jump(to: n - 1) }
+            }
+        } message: {
+            Text("1 to \(controller.pageCount)")
+        }
+        .alert("Outline", isPresented: $showOutline) {
+            TextField("Page title", text: $outlineText)
+            Button("Cancel", role: .cancel) {}
+            if let pid = currentPageId, currentNotebook.outlineTitle(pid) != nil {
+                Button("Remove", role: .destructive) {
+                    store.setOutline(notebookId: notebook.id, pageId: pid, title: nil)
+                }
+            }
+            Button("Save") {
+                if let pid = currentPageId {
+                    store.setOutline(notebookId: notebook.id, pageId: pid, title: outlineText)
+                    showToast("Added to outline")
+                }
+            }
+        } message: {
+            Text("Name this page so you can find it in the Outline.")
+        }
+        .alert(currentNotebook.title, isPresented: $showInfo) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(infoText)
         }
         .confirmationDialog(isCanvas ? "Clear the whole canvas?" : "Delete this page?",
                             isPresented: $confirmDeletePage, titleVisibility: .visible) {
             Button(isCanvas ? "Clear Canvas" : "Delete Page \(controller.pageIndex + 1)", role: .destructive) {
                 controller.pages?.deleteCurrentPage()
                 controller.board?.clearAll()
+                controller.zoomBoxOpen = controller.pages?.isZoomBoxOpen ?? false
             }
         } message: {
             Text("This can't be undone.")
@@ -187,10 +306,40 @@ struct EditorView: View {
             showToast(tools.toolTitle)
         }
         .onChange(of: controller.pageIndex) { _, _ in flashPageBadge() }
+        .onChange(of: pageImageItem) { _, item in
+            guard let item else { return }
+            pageImageItem = nil
+            closeMenus()
+            load(item) { addPages([$0]) }
+        }
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            photoItem = nil
+            closeMenus()
+            load(item, then: placePhoto)
+        }
+        .onChange(of: toolbarPhotoItem) { _, item in
+            guard let item else { return }
+            toolbarPhotoItem = nil
+            load(item, then: placePhoto)
+        }
         .onAppear(perform: runDemoHooks)
     }
 
-    private var currentNotebook: Notebook { store.notebook(notebook.id) ?? notebook }
+    private var toastTop: CGFloat {
+        if focusMode { return 14 }
+        var top: CGFloat = 70
+        if toolsDock == .top { top = 70 }
+        if colorsDock == .top && tools.tool.hasContextBar { top = 128 }
+        return top
+    }
+
+    private var infoText: String {
+        let nb = currentNotebook
+        let kind = nb.isCanvas ? "Infinite canvas" : "\(nb.pages.count) page\(nb.pages.count == 1 ? "" : "s")"
+        let folder = nb.folderId.map { store.folderPath($0) } ?? "Unfiled"
+        return "\(kind)\nFolder: \(folder)\nCreated: \(nb.createdAt.formatted(date: .abbreviated, time: .shortened))\nEdited: \(nb.modifiedAt.formatted(date: .abbreviated, time: .shortened))"
+    }
 
     // MARK: Chrome
 
@@ -205,12 +354,16 @@ struct EditorView: View {
             .padding(.top, 8)
             .frame(maxHeight: .infinity, alignment: .top)
 
-            if let t = dragTarget {
-                dockPlaceholder(t)
+            if let t = dragTarget, let b = dragBar {
+                dockPlaceholder(t, vertical: t.vertical, long: b == .tools ? 300 : 240)
                     .transition(.opacity)
             }
 
-            dockedTools(size: size)
+            placed(.tools, size: size)
+            if tools.tool.hasContextBar && !readOnly {
+                placed(.colors, size: size)
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
 
             bottomPill
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -220,52 +373,43 @@ struct EditorView: View {
             if showPageBadge && !isCanvas {
                 pageBadge
                     .frame(maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, dock == .bottom ? 128 : 22)
-                    .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    .padding(.bottom, (toolsDock == .bottom || colorsDock == .bottom) ? 128 : 22)
+                    .transition(.opacity)
                     .allowsHitTesting(false)
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showPageBadge)
+        .animation(.easeOut(duration: 0.2), value: showPageBadge)
+        .animation(.easeOut(duration: 0.2), value: tools.tool.hasContextBar)
     }
 
+    private func dock(of bar: BarKind) -> ToolbarDock { bar == .tools ? toolsDock : colorsDock }
+
     @ViewBuilder
-    private func dockedTools(size: CGSize) -> some View {
-        let bars = toolBars(vertical: dock.vertical)
-            .offset(dragOffset)
-            .gesture(dockDrag(size: size))
-        switch dock {
+    private func placed(_ bar: BarKind, size: CGSize) -> some View {
+        let d = dock(of: bar)
+        // When both bars share an edge the colour bar sits just inside the tools bar.
+        let extra: CGFloat = (bar == .colors && toolsDock == colorsDock) ? (d.vertical ? 62 : 58) : 0
+        let content = Group {
+            if bar == .tools { toolsGroup(vertical: d.vertical, size: size) } else { contextBar(vertical: d.vertical) }
+        }
+        .offset(dragBar == bar ? dragOffset : .zero)
+        .gesture(dockDrag(bar, size: size))
+        switch d {
         case .top:
-            bars.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 8)
+            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 8 + extra)
         case .bottom:
-            bars.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 14)
+            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 14 + extra)
         case .left:
-            bars.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.leading, 14)
+            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.leading, 14 + extra)
         case .right:
-            bars.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing).padding(.trailing, 14)
+            content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing).padding(.trailing, 14 + extra)
         }
     }
 
-    @ViewBuilder
-    private func toolBars(vertical: Bool) -> some View {
-        let layout = vertical ? AnyLayout(HStackLayout(spacing: 8)) : AnyLayout(VStackLayout(spacing: 8))
-        let barsFirst = dock == .top || dock == .left
-        GlassGroup(spacing: 14) {
-            layout {
-                if barsFirst { toolsGroup(vertical: vertical) }
-                if tools.tool != .lasso {
-                    contextBar(vertical: vertical)
-                        .transition(.scale(scale: 0.9, anchor: barsFirst ? (vertical ? .leading : .top) : (vertical ? .trailing : .bottom))
-                            .combined(with: .opacity))
-                }
-                if !barsFirst { toolsGroup(vertical: vertical) }
-            }
-        }
-        .animation(.snappy(duration: 0.24), value: tools.tool)
-    }
-
-    private func dockDrag(size: CGSize) -> some Gesture {
+    private func dockDrag(_ bar: BarKind, size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 16, coordinateSpace: .global)
             .onChanged { v in
+                if dragBar != bar { dragBar = bar }
                 dragOffset = v.translation
                 let target = nearestDock(v.location, in: size)
                 if target != dragTarget {
@@ -274,10 +418,11 @@ struct EditorView: View {
             }
             .onEnded { v in
                 let target = nearestDock(v.location, in: size)
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.8)) {
-                    dockRaw = target.rawValue
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                    if bar == .tools { dockRaw = target.rawValue } else { colorDockRaw = target.rawValue }
                     dragOffset = .zero
                     dragTarget = nil
+                    dragBar = nil
                 }
             }
     }
@@ -288,16 +433,17 @@ struct EditorView: View {
         return d.min { $0.1 < $1.1 }?.0 ?? .top
     }
 
-    private func dockPlaceholder(_ t: ToolbarDock) -> some View {
+    private func dockPlaceholder(_ t: ToolbarDock, vertical: Bool, long: CGFloat) -> some View {
         let shape = Capsule()
-        let fill = shape.fill(Theme.action.opacity(0.28))
+        let fill = shape.fill(Theme.action.opacity(0.22))
             .overlay(shape.strokeBorder(Theme.action.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])))
+            .frame(width: vertical ? 50 : long, height: vertical ? long : 50)
         return Group {
             switch t {
-            case .top: fill.frame(width: 300, height: 50).frame(maxHeight: .infinity, alignment: .top).padding(.top, 8)
-            case .bottom: fill.frame(width: 300, height: 50).frame(maxHeight: .infinity, alignment: .bottom).padding(.bottom, 14)
-            case .left: fill.frame(width: 50, height: 300).frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 14)
-            case .right: fill.frame(width: 50, height: 300).frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 14)
+            case .top: fill.frame(maxHeight: .infinity, alignment: .top).padding(.top, 8)
+            case .bottom: fill.frame(maxHeight: .infinity, alignment: .bottom).padding(.bottom, 14)
+            case .left: fill.frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 14)
+            case .right: fill.frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 14)
             }
         }
         .allowsHitTesting(false)
@@ -321,108 +467,193 @@ struct EditorView: View {
         }
         .padding(.horizontal, 6)
         .frame(height: 50)
-        .glassBackground(Capsule(), interactive: true)
+        .clearGlass(Capsule())
     }
 
     private var rightGroup: some View {
         HStack(spacing: 0) {
-            if !isCanvas {
-                barButton("plus", label: "Add Page") { controller.pages?.addPage() }
-            }
+            barButton("plus", label: "Add") { showAdd = true }
+                .popover(isPresented: $showAdd, arrowEdge: .top) {
+                    AddMenu(isCanvas: isCanvas, pageImageItem: $pageImageItem, photoItem: $photoItem, onAction: perform)
+                }
             barButton("arrow.up.left.and.arrow.down.right", label: "Focus Mode") {
                 focusMode = true
                 showToast("Focus mode")
             }
-            Menu {
-                if !isCanvas {
-                    Button { showSidebar = true } label: { Label("Pages", systemImage: "square.grid.2x2") }
+            barButton("ellipsis.circle", label: "More") { showMore = true }
+                .popover(isPresented: $showMore, arrowEdge: .top) {
+                    MoreMenu(isCanvas: isCanvas,
+                             pageLabel: "\(controller.pageIndex + 1) of \(controller.pageCount)",
+                             bookmarked: currentPageId.map(currentNotebook.isBookmarked) ?? false,
+                             inOutline: currentPageId.flatMap(currentNotebook.outlineTitle) != nil,
+                             zoomBoxOn: controller.zoomBoxOpen,
+                             readOnly: readOnly,
+                             horizontal: $horizontal,
+                             inputMode: $tools.inputMode,
+                             toolsDock: Binding(get: { toolsDock }, set: { d in withAnimation(.spring) { dockRaw = d.rawValue } }),
+                             colorsDock: Binding(get: { colorsDock }, set: { d in withAnimation(.spring) { colorDockRaw = d.rawValue } }),
+                             onAction: perform)
                 }
-                Button { showPaper = true } label: {
-                    Label(isCanvas ? "Background" : "Paper & Template", systemImage: "doc.richtext")
-                }
-                Button { exportPDF() } label: { Label("Export as PDF", systemImage: "square.and.arrow.up") }
-                Picker(selection: $tools.inputMode) {
-                    ForEach(DrawingInput.allCases) { m in Text(m.title).tag(m) }
-                } label: {
-                    Label("Drawing Input", systemImage: "hand.draw")
-                }
-                Picker(selection: Binding(get: { dock }, set: { d in withAnimation(.spring) { dockRaw = d.rawValue } })) {
-                    ForEach(ToolbarDock.allCases) { d in Text(d.title).tag(d) }
-                } label: {
-                    Label("Toolbar Position", systemImage: "rectangle.3.group")
-                }
-                Divider()
-                Button(role: .destructive) { confirmDeletePage = true } label: {
-                    Label(isCanvas ? "Clear Canvas" : "Delete Page", systemImage: "trash")
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundStyle(Color.primary)
-                    .frame(width: 42, height: 42)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("More")
         }
         .padding(.horizontal, 6)
         .frame(height: 50)
-        .glassBackground(Capsule(), interactive: true)
+        .clearGlass(Capsule())
     }
 
-    private func toolsGroup(vertical: Bool) -> some View {
+    // MARK: Tools bar
+
+    private var extraItems: [ToolbarItemKind] {
+        tools.toolbarItems.filter { !(isCanvas && $0.pagedOnly) }
+    }
+
+    private func toolsGroup(vertical: Bool, size: CGSize) -> some View {
         let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
+        let items = extraItems
+        // Leave room for the side groups; extra tools scroll when they don't fit.
+        let available = vertical ? size.height - 170 : size.width - (toolsDock == .top ? 430 : 120)
+        let room = max(88, available - 232)
+        let extrasLength = CGFloat(items.count) * 44
         return layout {
+            grip(vertical: vertical)
             toolButton(.pen, symbol: tools.pen.kind.symbol, ink: tools.pen.colorHex, label: "Pen")
             toolButton(.highlighter, symbol: "highlighter", ink: tools.highlighter.colorHex, label: "Highlighter")
             toolButton(.eraser, symbol: "eraser", ink: nil, label: "Eraser")
             toolButton(.lasso, symbol: "lasso", ink: nil, label: "Lasso")
-            Rectangle()
-                .fill(Color.primary.opacity(0.15))
-                .frame(width: vertical ? 24 : 1, height: vertical ? 1 : 24)
-                .padding(vertical ? .vertical : .horizontal, 4)
-            Button {
-                tools.rulerActive.toggle()
-            } label: {
-                Image(systemName: "ruler")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(tools.rulerActive ? Theme.action : Color.primary)
-                    .symbolEffect(.bounce, value: tools.rulerActive)
-                    .frame(width: 42, height: 38)
-                    .background(Capsule().fill(tools.rulerActive ? Theme.action.opacity(0.2) : Color.clear))
-                    .contentShape(Rectangle())
+            if !items.isEmpty {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.15))
+                    .frame(width: vertical ? 24 : 1, height: vertical ? 1 : 24)
+                    .padding(vertical ? .vertical : .horizontal, 3)
+                if extrasLength > room {
+                    ScrollView(vertical ? .vertical : .horizontal) {
+                        extrasStack(items, vertical: vertical)
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(width: vertical ? 46 : room, height: vertical ? room : 40)
+                } else {
+                    extrasStack(items, vertical: vertical)
+                }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Ruler")
-            // Grip: drag the bar to any edge of the screen.
-            Image(systemName: vertical ? "line.3.horizontal" : "line.3.horizontal")
-                .rotationEffect(.degrees(vertical ? 0 : 90))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.secondary.opacity(0.7))
-                .frame(width: vertical ? 42 : 18, height: vertical ? 18 : 38)
-                .contentShape(Rectangle())
-                .accessibilityLabel("Move Toolbar")
         }
         .padding(vertical ? .vertical : .horizontal, 6)
         .frame(width: vertical ? 54 : nil, height: vertical ? nil : 50)
-        .glassBackground(Capsule(), interactive: true)
+        .clearGlass(Capsule())
+        .opacity(readOnly ? 0.55 : 1)
         .popover(isPresented: $showToolSettings) {
             toolSettings
         }
+    }
+
+    private func extrasStack(_ items: [ToolbarItemKind], vertical: Bool) -> some View {
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
+        return layout {
+            ForEach(items) { item in extraButton(item) }
+        }
+    }
+
+    private func grip(vertical: Bool) -> some View {
+        Image(systemName: "line.3.horizontal")
+            .rotationEffect(.degrees(vertical ? 0 : 90))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Color.secondary.opacity(0.7))
+            .frame(width: vertical ? 42 : 18, height: vertical ? 18 : 38)
+            .contentShape(Rectangle())
+            .accessibilityLabel("Move bar")
+    }
+
+    @ViewBuilder
+    private func extraButton(_ item: ToolbarItemKind) -> some View {
+        if let t = item.tool {
+            toolButton(t, symbol: t.symbol, ink: nil, label: item.title)
+        } else {
+            switch item {
+            case .photo:
+                PhotosPicker(selection: $toolbarPhotoItem, matching: .images) {
+                    extraIcon(item.symbol, on: false)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.title)
+            case .emoji:
+                extraAction(item, on: false) { showEmojiPopover = true }
+                    .popover(isPresented: $showEmojiPopover) {
+                        EmojiGrid { e in showEmojiPopover = false; perform(.emoji(e)) }
+                            .padding(14)
+                            .frame(width: 340, height: 360)
+                            .presentationCompactAdaptation(.popover)
+                            .darkPanel()
+                    }
+            case .stickers:
+                extraAction(item, on: false) { showStickerPopover = true }
+                    .popover(isPresented: $showStickerPopover) {
+                        StickerGrid { s in showStickerPopover = false; perform(.sticker(s)) }
+                            .padding(14)
+                            .frame(width: 340, height: 380)
+                            .presentationCompactAdaptation(.popover)
+                            .darkPanel()
+                    }
+            case .ruler:
+                extraAction(item, on: tools.rulerActive) { tools.rulerActive.toggle() }
+            case .readOnly:
+                extraAction(item, on: readOnly) { perform(.readOnly) }
+            case .zoomBox:
+                extraAction(item, on: controller.zoomBoxOpen) { perform(.zoomBox) }
+            case .viewMode:
+                extraAction(item, on: horizontal) {
+                    horizontal.toggle()
+                    showToast(horizontal ? "Horizontal pages" : "Vertical pages")
+                }
+            case .bookmark:
+                extraAction(item, on: currentPageId.map(currentNotebook.isBookmarked) ?? false) { perform(.bookmark) }
+            default:
+                extraAction(item, on: false) {
+                    switch item {
+                    case .stickyNote: perform(.stickyNote)
+                    case .camera: perform(.camera)
+                    case .addPage: perform(.addPage)
+                    case .duplicatePage: perform(.duplicatePage)
+                    case .outline: perform(.outline)
+                    case .search: perform(.search)
+                    case .allNotes: perform(.allNotes)
+                    case .sharePDF: perform(.sharePDF)
+                    case .sharePNG: perform(.sharePNG)
+                    case .savePhoto: perform(.savePhoto)
+                    default: break
+                    }
+                }
+            }
+        }
+    }
+
+    private func extraAction(_ item: ToolbarItemKind, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { extraIcon(item.symbol, on: on) }
+            .buttonStyle(PressableStyle())
+            .accessibilityLabel(item.title)
+    }
+
+    private func extraIcon(_ symbol: String, on: Bool) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(on ? Theme.action : Color.primary)
+            .frame(width: 44, height: 38)
+            .background(Capsule().fill(on ? Theme.action.opacity(0.2) : Color.clear))
+            .contentShape(Rectangle())
     }
 
     private func toolButton(_ tool: EditorTool, symbol: String, ink: String?, label: String) -> some View {
         let selected = tools.tool == tool
         return Button {
             if selected {
-                if tool == .pen || tool == .highlighter || tool == .eraser { showToolSettings = true }
+                if tool == .pen || tool == .highlighter || tool == .eraser || tool == .shapes { showToolSettings = true }
             } else {
                 tools.tool = tool
+                if tool == .text { showToast("Tap the page to type") }
+                if tool == .tape { showToast("Drag across writing to cover it") }
+                if tool == .shapes { showToast("Draw a shape and it snaps clean") }
             }
         } label: {
             VStack(spacing: 2) {
                 Image(systemName: symbol)
                     .font(.system(size: 18, weight: selected ? .semibold : .medium))
-                    .symbolEffect(.bounce, value: selected)
                 if let ink {
                     // Ink colour bar with an outline so white/yellow ink is still visible.
                     Capsule()
@@ -445,11 +676,14 @@ struct EditorView: View {
         .accessibilityLabel(label)
     }
 
+    // MARK: Colour & size bar
+
     private func contextBar(vertical: Bool) -> some View {
         let layout = vertical ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 10))
         return layout {
+            grip(vertical: vertical)
             switch tools.tool {
-            case .pen:
+            case .pen, .shapes:
                 ForEach(0..<3, id: \.self) { i in
                     quickColor(hex: tools.penQuickColors[i], selected: tools.pen.colorHex == tools.penQuickColors[i]) {
                         tools.pen.colorHex = tools.penQuickColors[i]
@@ -491,13 +725,32 @@ struct EditorView: View {
                         }
                     }
                 }
-            case .lasso:
+            case .text:
+                ForEach(Array((["#1C1C1E"] + tools.penQuickColors).enumerated()), id: \.offset) { _, hex in
+                    quickColor(hex: hex, selected: tools.textColorHex == hex) {
+                        tools.textColorHex = hex
+                    } replace: {}
+                }
+                barDivider(vertical)
+                ForEach(Array([16, 22, 32].enumerated()), id: \.offset) { i, s in
+                    Button { tools.textSize = CGFloat(s) } label: {
+                        Text("A")
+                            .font(.system(size: [12, 16, 21][i], weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                            .frame(width: 36, height: 30)
+                            .background(Capsule().fill(abs(tools.textSize - CGFloat(s)) < 0.5 ? Theme.action.opacity(0.25) : Color.clear))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityLabel(["Small text", "Medium text", "Large text"][i])
+                }
+            default:
                 EmptyView()
             }
         }
         .padding(vertical ? .vertical : .horizontal, vertical ? 10 : 12)
         .frame(width: vertical ? 48 : nil, height: vertical ? nil : 46)
-        .glassBackground(Capsule(), interactive: true)
+        .clearGlass(Capsule())
         .animation(.snappy(duration: 0.2), value: tools.pen.colorHex)
         .animation(.snappy(duration: 0.2), value: tools.highlighter.colorHex)
     }
@@ -511,7 +764,7 @@ struct EditorView: View {
     private func quickColor(hex: String, selected: Bool, select: @escaping () -> Void,
                             replace: @escaping () -> Void) -> some View {
         Button {
-            if selected { showToolSettings = true } else { select() }
+            if selected && tools.tool != .text { showToolSettings = true } else { select() }
         } label: {
             ZStack {
                 Circle()
@@ -563,10 +816,10 @@ struct EditorView: View {
     @ViewBuilder
     private var toolSettings: some View {
         switch tools.tool {
-        case .pen: PenSettingsView().environmentObject(tools)
+        case .pen, .shapes: PenSettingsView().environmentObject(tools)
         case .highlighter: HighlighterSettingsView().environmentObject(tools)
         case .eraser: EraserSettingsView().environmentObject(tools)
-        case .lasso: EmptyView()
+        default: EmptyView()
         }
     }
 
@@ -606,7 +859,7 @@ struct EditorView: View {
             focusMode = false
         } label: {
             VStack(spacing: 2) {
-                Image(systemName: currentToolSymbol)
+                Image(systemName: tools.toolSymbol)
                     .font(.system(size: 20, weight: .medium))
                 if tools.tool == .pen {
                     Capsule().fill(Color(hex: tools.pen.colorHex)).frame(width: 14, height: 3.5)
@@ -618,17 +871,8 @@ struct EditorView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
-        .glassBackground(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+        .clearGlass(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .accessibilityLabel("Show Toolbar")
-    }
-
-    private var currentToolSymbol: String {
-        switch tools.tool {
-        case .pen: return tools.pen.kind.symbol
-        case .highlighter: return "highlighter"
-        case .eraser: return "eraser"
-        case .lasso: return "lasso"
-        }
     }
 
     /// Bottom-left: pages panel, page number and zoom (tap the zoom to fit the page again).
@@ -663,11 +907,23 @@ struct EditorView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Zoom \(controller.zoomPercent) percent. Tap to reset.")
+            if readOnly {
+                pillDivider
+                Button { perform(.readOnly) } label: {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.action)
+                        .frame(width: 40, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel("Read only. Tap to edit.")
+            }
         }
         .font(.footnote.monospacedDigit().weight(.semibold))
         .foregroundStyle(Color.primary)
         .padding(.horizontal, 4)
-        .glassBackground(Capsule(), interactive: true)
+        .clearGlass(Capsule())
         .animation(.snappy, value: controller.pageIndex)
         .animation(.snappy, value: controller.zoomPercent)
     }
@@ -688,37 +944,207 @@ struct EditorView: View {
         .background(Capsule().fill(Color.black.opacity(0.82)))
     }
 
-    // MARK: Pages sidebar
+    // MARK: Pages sidebar & All Notes
+
+    /// Swipe in from the left edge to open the pages panel (like Noteshelf).
+    private var edgeSwipeArea: some View {
+        Color.clear
+            .frame(width: 18)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 14).onEnded { v in
+                if v.translation.width > 40 { showSidebar = true }
+            })
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .ignoresSafeArea()
+    }
 
     private var sidebarLayer: some View {
-        ZStack(alignment: .leading) {
+        let nb = currentNotebook
+        let ids = nb.pages
+        return ZStack(alignment: .leading) {
             Color.black.opacity(0.18)
                 .ignoresSafeArea()
-                .onTapGesture { showSidebar = false }
+                .onTapGesture { showSidebar = false; showAllNotes = false }
                 .transition(.opacity)
-            PageSidebar(title: currentNotebook.title,
-                        template: currentNotebook.template, paper: currentNotebook.paper,
-                        count: controller.pageCount, current: controller.pageIndex,
-                        thumbnail: { i in controller.pages?.thumbnail(of: i, width: 120) },
-                        onSelect: { i in controller.pages?.jump(to: i) },
-                        onAdd: { controller.pages?.addPage() },
-                        onClose: { showSidebar = false })
-                .transition(.move(edge: .leading))
+            HStack(spacing: 0) {
+                if showAllNotes {
+                    AllNotesPanel(current: notebook.id,
+                                  onBack: { showAllNotes = false },
+                                  onOpen: { other in
+                                      controller.surface?.saveAll()
+                                      onSwitch(other)
+                                  })
+                        .environmentObject(store)
+                        .transition(.move(edge: .leading))
+                }
+                PageSidebar(title: nb.title,
+                            template: nb.template, paper: nb.paper,
+                            count: controller.pageCount, current: controller.pageIndex,
+                            thumbnail: { i in controller.pages?.thumbnail(of: i, width: 120) },
+                            bookmarked: { i in ids.indices.contains(i) && nb.isBookmarked(ids[i]) },
+                            outlineTitle: { i in ids.indices.contains(i) ? nb.outlineTitle(ids[i]) : nil },
+                            hasPhotos: { i in controller.pages?.pageHasPhotos(i) ?? false },
+                            pageText: { i in controller.pages?.pageText(i) ?? "" },
+                            onToggleBookmark: { i in
+                                if ids.indices.contains(i) { store.toggleBookmark(notebookId: notebook.id, pageId: ids[i]) }
+                            },
+                            onSelect: { i in controller.pages?.jump(to: i) },
+                            onAdd: { controller.pages?.addPage() },
+                            onAllNotes: { showAllNotes.toggle() },
+                            onClose: { showSidebar = false; showAllNotes = false })
+                    .transition(.move(edge: .leading))
+                    .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { v in
+                        guard abs(v.translation.width) > abs(v.translation.height) * 1.5 else { return }
+                        if v.translation.width > 60 {
+                            showAllNotes = true
+                        } else if v.translation.width < -60 {
+                            if showAllNotes { showAllNotes = false } else { showSidebar = false }
+                        }
+                    })
+            }
         }
         .zIndex(5)
     }
 
-    // MARK: Helpers
+    // MARK: Actions
+
+    private func closeMenus(then action: (() -> Void)? = nil) {
+        showAdd = false
+        showMore = false
+        if let action {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: action)
+        }
+    }
+
+    private func perform(_ a: EditorAction) {
+        switch a {
+        case .addPage:
+            closeMenus()
+            controller.pages?.addPage()
+            showToast("Page added")
+        case .chooseTemplate, .background:
+            closeMenus { showPaper = true }
+        case .scanDocument:
+            closeMenus { cover = .scanner }
+        case .pageFromCamera:
+            closeMenus { cover = .cameraPage }
+        case .importFile:
+            closeMenus { showImporter = true }
+        case .camera:
+            closeMenus { cover = .cameraPhoto }
+        case .stickyNote:
+            closeMenus()
+            place { u in PageElement(kind: .sticky, x: u.x - 110, y: u.y - 110, w: 220, h: 220,
+                                     text: "", colorHex: ElementView.softColors[0], fontSize: 24) }
+        case .textBox:
+            closeMenus()
+            tools.tool = .text
+            showToast("Tap the page to type")
+        case .emoji(let e):
+            closeMenus()
+            place { u in PageElement(kind: .emoji, x: u.x - 45, y: u.y - 45, w: 90, h: 90, text: e) }
+        case .sticker(let s):
+            closeMenus()
+            let parts = s.split(separator: "|").map(String.init)
+            place { u in PageElement(kind: .emoji, x: u.x - 50, y: u.y - 50, w: 100, h: 100,
+                                     colorHex: parts.count > 1 ? parts[1] : "#F5B700", symbol: parts.first) }
+        case .sharePDF:
+            closeMenus { exportPDF() }
+        case .sharePNG:
+            closeMenus { sharePNG() }
+        case .savePhoto:
+            closeMenus()
+            savePageToPhotos()
+        case .goToPage:
+            closeMenus {
+                goToText = ""
+                showGoTo = true
+            }
+        case .bookmark:
+            guard let pid = currentPageId else { return }
+            store.toggleBookmark(notebookId: notebook.id, pageId: pid)
+            showToast(currentNotebook.isBookmarked(pid) ? "Page bookmarked" : "Bookmark removed")
+        case .outline:
+            closeMenus {
+                outlineText = currentPageId.flatMap(currentNotebook.outlineTitle) ?? "Page \(controller.pageIndex + 1)"
+                showOutline = true
+            }
+        case .duplicatePage:
+            closeMenus()
+            controller.pages?.duplicateCurrentPage()
+            showToast("Page duplicated")
+        case .deletePage, .clearCanvas:
+            closeMenus { confirmDeletePage = true }
+        case .zoomBox:
+            closeMenus()
+            controller.pages?.toggleZoomBox()
+            controller.zoomBoxOpen = controller.pages?.isZoomBoxOpen ?? false
+            if controller.zoomBoxOpen && !tools.tool.inks && tools.tool != .eraser { tools.tool = .pen }
+        case .readOnly:
+            closeMenus()
+            readOnly.toggle()
+            showToast(readOnly ? "Read only" : "Editing")
+        case .info:
+            closeMenus { showInfo = true }
+        case .customizeToolbar:
+            closeMenus { showCustomize = true }
+        case .tool(let t):
+            closeMenus()
+            tools.tool = t
+            showToast(tools.toolTitle)
+        case .allNotes:
+            closeMenus()
+            showSidebar = true
+            showAllNotes = true
+        case .search:
+            closeMenus()
+            showSidebar = true
+        }
+    }
+
+    /// Puts a new object in the middle of the screen and switches to the
+    /// object tool so it can be moved and resized straight away.
+    private func place(_ make: @escaping (CGPoint) -> PageElement) {
+        guard !readOnly else { showToast("Read only"); return }
+        controller.surface?.placeObject(make)
+        tools.tool = .text
+        showToast("Drag to move · pull the corner to resize")
+    }
+
+    private func placePhoto(_ image: UIImage) {
+        guard let name = store.saveImageAsset(image, notebookId: notebook.id) else { return }
+        let ratio = image.size.height / max(image.size.width, 1)
+        let w: CGFloat = ratio > 1.3 ? 260 : 380
+        place { u in PageElement(kind: .image, x: u.x - w / 2, y: u.y - w * ratio / 2, w: w, h: w * ratio, imageFile: name) }
+    }
+
+    private func addPages(_ images: [UIImage]) {
+        guard !images.isEmpty else { return }
+        if isCanvas {
+            images.first.map(placePhoto)
+            return
+        }
+        controller.pages?.insertPages(count: images.count, backgrounds: images)
+        showToast(images.count == 1 ? "Page added" : "\(images.count) pages added")
+    }
+
+    private func load(_ item: PhotosPickerItem, then use: @escaping (UIImage) -> Void) {
+        Task { @MainActor in
+            if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
+                use(img)
+            }
+        }
+    }
 
     private func closeSqueeze() {
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { controller.squeezePoint = nil }
+        withAnimation(.easeOut(duration: 0.15)) { controller.squeezePoint = nil }
     }
 
     private func showToast(_ text: String) {
         toastTask?.cancel()
         toast = text
         toastTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_300_000_000)
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
             guard !Task.isCancelled else { return }
             toast = nil
         }
@@ -737,16 +1163,34 @@ struct EditorView: View {
 
     private func exportPDF() {
         let nb = currentNotebook
+        let nbId = nb.id
+        let lib = store
         if let board = controller.board {
-            let (drawing, rect) = board.drawingForExport()
-            if let url = PDFExporter.exportCanvas(title: nb.title, paper: nb.paper, drawing: drawing, rect: rect) {
+            let (drawing, elements, rect) = board.drawingForExport()
+            if let url = PDFExporter.exportCanvas(title: nb.title, paper: nb.paper, drawing: drawing, elements: elements,
+                                                  rect: rect, imageLoader: board.imageLoader) {
                 shareItem = ShareItem(url: url)
             }
         } else if let pages = controller.pages,
                   let url = PDFExporter.export(title: nb.title, template: nb.template, paper: nb.paper,
-                                               drawings: pages.drawingsForExport()) {
+                                               pages: pages.pageContents(),
+                                               imageLoader: { lib.loadImageAsset($0, notebookId: nbId) }) {
             shareItem = ShareItem(url: url)
         }
+    }
+
+    private func sharePNG() {
+        guard let pages = controller.pages,
+              let image = pages.pageImage(controller.pageIndex, width: 1600),
+              let url = PDFExporter.exportPNG(title: "\(currentNotebook.title) p\(controller.pageIndex + 1)", image: image)
+        else { return }
+        shareItem = ShareItem(url: url)
+    }
+
+    private func savePageToPhotos() {
+        guard let image = controller.pages?.pageImage(controller.pageIndex, width: 1600) else { return }
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+        showToast("Saved to Photos")
     }
 
     private func runDemoHooks() {
@@ -755,27 +1199,31 @@ struct EditorView: View {
             showToast("Focus mode")
         }
         if let d = DemoMode.dock { dockRaw = d.rawValue } else if DemoMode.enabled { dockRaw = ToolbarDock.top.rawValue }
-        if DemoMode.showPen {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { showToolSettings = true }
+        if DemoMode.enabled { colorDockRaw = (DemoMode.colorsDock ?? .top).rawValue }
+        if DemoMode.enabled { horizontal = DemoMode.horizontal }
+        if DemoMode.enabled { tools.toolbarItems = DemoMode.customize ? ToolbarItemKind.defaults + [.tape, .zoomBox, .stickyNote] : ToolbarItemKind.defaults }
+        if DemoMode.textTool { tools.tool = .text }
+        let after = { (delay: Double, work: @escaping () -> Void) in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
-        if DemoMode.squeeze {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                withAnimation(.spring) { controller.squeezePoint = CGPoint(x: 520, y: 640) }
-            }
-        }
-        if DemoMode.sidebar {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showSidebar = true }
-        }
+        if DemoMode.showPen { after(1.2) { showToolSettings = true } }
+        if DemoMode.squeeze { after(1.2) { withAnimation(.easeOut(duration: 0.2)) { controller.squeezePoint = CGPoint(x: 520, y: 640) } } }
+        if DemoMode.sidebar { after(1.0) { showSidebar = true } }
+        if DemoMode.allNotes { after(1.0) { showSidebar = true; showAllNotes = true } }
+        if DemoMode.showAdd { after(1.2) { showAdd = true } }
+        if DemoMode.showMore { after(1.2) { showMore = true } }
+        if DemoMode.customize { after(1.2) { showCustomize = true } }
+        if DemoMode.zoomBox { after(1.2) { perform(.zoomBox) } }
     }
 }
 
 /// Buttons shrink a little while pressed.
 struct PressableStyle: ButtonStyle {
-    var scale: CGFloat = 0.88
+    var scale: CGFloat = 0.9
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? scale : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 
@@ -785,7 +1233,10 @@ struct PaperSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State var template: PageTemplate
     @State var paper: PaperColor
+    var isCanvas = false
     let onApply: (PageTemplate, PaperColor) -> Void
+
+    private var templates: [PageTemplate] { isCanvas ? [.blank, .grid, .dotted, .ruled] : PageTemplate.allCases }
 
     var body: some View {
         NavigationStack {
@@ -802,9 +1253,9 @@ struct PaperSheet: View {
                                 .onTapGesture { withAnimation(.snappy) { paper = p } }
                         }
                     }
-                    SectionTitle(text: "Template")
+                    SectionTitle(text: isCanvas ? "Background" : "Template")
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: 3), spacing: 16) {
-                        ForEach(PageTemplate.allCases) { t in
+                        ForEach(templates) { t in
                             VStack(spacing: 6) {
                                 TemplateThumbnail(template: t, paper: paper)
                                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.action, lineWidth: template == t ? 3 : 0))
@@ -816,7 +1267,7 @@ struct PaperSheet: View {
                 }
                 .padding(24)
             }
-            .navigationTitle("Paper & Template")
+            .navigationTitle(isCanvas ? "Background" : "Paper & Template")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

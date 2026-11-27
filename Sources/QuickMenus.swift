@@ -80,7 +80,8 @@ struct SqueezeMenu: View {
         .frame(width: area.width, height: area.height, alignment: .topLeading)
         .environment(\.colorScheme, .dark)
         .onAppear {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { shown = true }
+            // A quick, smooth reveal: no overshoot or wobble.
+            withAnimation(.easeOut(duration: 0.2)) { shown = true }
         }
     }
 
@@ -208,19 +209,20 @@ struct ArcBand: Shape {
     }
 }
 
-/// Springs a view in from nothing, with a small delay for a staggered effect.
+/// Fades a view in with a slight grow, staggered a touch. Eased, never bouncy.
 struct PopIn: ViewModifier {
     let shown: Bool
     let delay: Double
     func body(content: Content) -> some View {
         content
-            .scaleEffect(shown ? 1 : 0.3)
+            .scaleEffect(shown ? 1 : 0.88)
             .opacity(shown ? 1 : 0)
-            .animation(.spring(response: 0.36, dampingFraction: 0.68).delay(delay), value: shown)
+            .animation(.easeOut(duration: 0.18).delay(delay * 0.5), value: shown)
     }
 }
 
-/// Dark panel on the left with page thumbnails (like Noteshelf's page sidebar).
+/// Dark panel on the left with page thumbnails (like Noteshelf's page sidebar):
+/// search, Bookmarks / Outline / Photos filters and a bookmark ribbon on each page.
 struct PageSidebar: View {
     let title: String
     let template: PageTemplate
@@ -228,19 +230,50 @@ struct PageSidebar: View {
     let count: Int
     let current: Int
     let thumbnail: (Int) -> UIImage?
+    let bookmarked: (Int) -> Bool
+    let outlineTitle: (Int) -> String?
+    let hasPhotos: (Int) -> Bool
+    let pageText: (Int) -> String
+    let onToggleBookmark: (Int) -> Void
     let onSelect: (Int) -> Void
     let onAdd: () -> Void
+    let onAllNotes: () -> Void
     let onClose: () -> Void
+
+    private enum Filter: String, CaseIterable { case all = "All", bookmarks = "Bookmarks", outline = "Outline", photos = "Photos" }
+    @State private var filter: Filter = .all
+    @State private var query = ""
+
+    private var shown: [Int] {
+        (0..<count).filter { i in
+            switch filter {
+            case .all: break
+            case .bookmarks: if !bookmarked(i) { return false }
+            case .outline: if outlineTitle(i) == nil { return false }
+            case .photos: if !hasPhotos(i) { return false }
+            }
+            guard !query.isEmpty else { return true }
+            let q = query.lowercased()
+            return "\(i + 1)" == q
+                || (outlineTitle(i)?.lowercased().contains(q) ?? false)
+                || pageText(i).lowercased().contains(q)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Button(action: onClose) {
+            HStack(spacing: 18) {
+                Button(action: onAllNotes) {
                     Image(systemName: "sidebar.left").font(.system(size: 18, weight: .medium))
                 }
                 .buttonStyle(PressableStyle())
-                .accessibilityLabel("Close Pages")
+                .accessibilityLabel("All Notes")
                 Spacer()
+                Button(action: onAdd) {
+                    Image(systemName: "doc.badge.plus").font(.system(size: 18, weight: .medium))
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel("New Page")
                 Button(action: onClose) {
                     Image(systemName: "xmark").font(.system(size: 17, weight: .semibold))
                 }
@@ -248,34 +281,65 @@ struct PageSidebar: View {
                 .accessibilityLabel("Close")
             }
             .foregroundStyle(Theme.action)
-            Text(title)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            Text(count == 1 ? "1 page" : "\(count) pages")
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.55))
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text("\(count)")
+                    .font(.footnote.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.white.opacity(0.5))
+                TextField("Search", text: $query)
+                    .foregroundStyle(.white)
+                    .autocorrectionDisabled()
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .background(Capsule().fill(Color.white.opacity(0.1)))
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(Filter.allCases, id: \.self) { f in
+                        Button { withAnimation(.easeOut(duration: 0.18)) { filter = f } } label: {
+                            Text(f.rawValue)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(filter == f ? Color.white : Theme.action)
+                                .padding(.horizontal, 12)
+                                .frame(height: 32)
+                                .background(Capsule().fill(filter == f ? Theme.action.opacity(0.7) : Color.clear))
+                                .overlay(Capsule().stroke(Color.white.opacity(filter == f ? 0 : 0.18), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
             ScrollViewReader { proxy in
                 ScrollView {
+                    if shown.isEmpty {
+                        Text(filter == .all ? "No pages match" : "No \(filter.rawValue.lowercased()) yet")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.5))
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                    }
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], spacing: 18) {
-                        ForEach(0..<count, id: \.self) { i in
+                        ForEach(shown, id: \.self) { i in
                             PageThumb(index: i, template: template, paper: paper,
-                                      selected: i == current, image: thumbnail(i))
+                                      selected: i == current, image: thumbnail(i),
+                                      bookmarked: bookmarked(i), caption: outlineTitle(i),
+                                      onBookmark: { onToggleBookmark(i) })
                                 .id(i)
                                 .onTapGesture { onSelect(i) }
                         }
-                        Button(action: onAdd) {
-                            VStack(spacing: 8) {
-                                Image(systemName: "doc.badge.plus")
-                                    .font(.system(size: 26))
-                                    .foregroundStyle(Theme.action)
-                                    .frame(maxWidth: .infinity)
-                                    .aspectRatio(TemplateRenderer.pageSize.width / TemplateRenderer.pageSize.height, contentMode: .fit)
-                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
-                                Text("New Page").font(.caption.weight(.medium)).foregroundStyle(Theme.action)
-                            }
-                        }
-                        .buttonStyle(PressableStyle(scale: 0.95))
                     }
                     .padding(.vertical, 6)
                 }
@@ -284,7 +348,7 @@ struct PageSidebar: View {
             }
         }
         .padding(18)
-        .frame(width: 300)
+        .frame(width: 320)
         .frame(maxHeight: .infinity)
         .background(Color(hex: "#111113").ignoresSafeArea())
         .environment(\.colorScheme, .dark)
@@ -297,22 +361,98 @@ private struct PageThumb: View {
     let paper: PaperColor
     let selected: Bool
     let image: UIImage?
+    let bookmarked: Bool
+    let caption: String?
+    let onBookmark: () -> Void
 
     var body: some View {
         VStack(spacing: 6) {
-            TemplateThumbnail(template: template, paper: paper)
-                .overlay {
-                    if let image {
-                        Image(uiImage: image).resizable().scaledToFit()
-                    }
+            Group {
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .shadow(color: .black.opacity(0.12), radius: 2, x: 0, y: 1)
+                } else {
+                    TemplateThumbnail(template: template, paper: paper)
                 }
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.action : Color.clear, lineWidth: 3).padding(-3))
-                .scaleEffect(selected ? 1.02 : 1)
-            Text("\(index + 1)")
-                .font(.caption.weight(.semibold).monospacedDigit())
-                .foregroundStyle(selected ? Theme.action : .white.opacity(0.75))
+            }
+            .overlay(alignment: .topTrailing) {
+                Button(action: onBookmark) {
+                    Image(systemName: bookmarked ? "bookmark.fill" : "bookmark")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(bookmarked ? Theme.action : Color.gray.opacity(0.55))
+                        .padding(6)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel(bookmarked ? "Remove bookmark" : "Bookmark page")
+            }
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.action : Color.clear, lineWidth: 3).padding(-3))
+            HStack(spacing: 4) {
+                Text("\(index + 1)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                if let caption {
+                    Text(caption).font(.caption).lineLimit(1)
+                }
+            }
+            .foregroundStyle(selected ? Theme.action : .white.opacity(0.75))
         }
         .contentShape(Rectangle())
-        .animation(.snappy, value: selected)
+        .animation(.easeOut(duration: 0.18), value: selected)
+    }
+}
+
+/// "All Notes": every notebook, newest first, to jump straight to another one.
+struct AllNotesPanel: View {
+    @EnvironmentObject var store: LibraryStore
+    let current: UUID
+    let onBack: () -> Void
+    let onOpen: (Notebook) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left").font(.system(size: 18, weight: .semibold))
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel("Back")
+                Spacer()
+                Text("All Notes").font(.system(size: 22, weight: .regular, design: .serif)).foregroundStyle(.white)
+                Spacer()
+                Color.clear.frame(width: 20, height: 1)
+            }
+            .foregroundStyle(.white)
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(store.sorted(store.activeNotebooks, by: .modified)) { nb in
+                        Button {
+                            if nb.id != current { onOpen(nb) }
+                        } label: {
+                            HStack(spacing: 12) {
+                                NotebookCoverView(cover: nb.cover)
+                                    .frame(width: 38, height: 50)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(nb.title).font(.system(size: 16, weight: .medium)).foregroundStyle(.white).lineLimit(2)
+                                    Text(NotebookTile.dateText(nb.modifiedAt)).font(.caption).foregroundStyle(.white.opacity(0.5))
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(nb.id == current ? Color.white.opacity(0.12) : Color.clear))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .padding(18)
+        .frame(width: 300)
+        .frame(maxHeight: .infinity)
+        .background(Color.black.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)
     }
 }

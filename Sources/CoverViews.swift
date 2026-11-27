@@ -148,6 +148,9 @@ struct FolderShape: Shape {
 struct FolderCard: View {
     let folder: Folder
     let notebooks: [Notebook]
+    var subfolders: Int = 0
+    /// Notebooks in this folder and its subfolders (defaults to the direct ones).
+    var total: Int? = nil
     @Environment(\.colorScheme) private var scheme
 
     private var base: Color { Color(hex: Theme.folderColors[abs(folder.colorIndex) % Theme.folderColors.count]) }
@@ -157,10 +160,10 @@ struct FolderCard: View {
             ZStack(alignment: .bottom) {
                 // Back of the folder, with the tab.
                 FolderShape()
-                    .fill(LinearGradient(colors: [base.opacity(scheme == .dark ? 0.55 : 0.42),
-                                                  base.opacity(scheme == .dark ? 0.35 : 0.22)],
+                    .fill(LinearGradient(colors: [base.opacity(scheme == .dark ? 0.34 : 0.24),
+                                                  base.opacity(scheme == .dark ? 0.16 : 0.10)],
                                          startPoint: .top, endPoint: .bottom))
-                    .overlay(FolderShape().stroke(Color.white.opacity(scheme == .dark ? 0.12 : 0.5), lineWidth: 1))
+                    .overlay(FolderShape().stroke(Color.white.opacity(scheme == .dark ? 0.14 : 0.55), lineWidth: 1))
 
                 contents
                     .frame(height: 150, alignment: .top)
@@ -168,10 +171,12 @@ struct FolderCard: View {
 
                 // Frosted glass front.
                 let front = RoundedRectangle(cornerRadius: 22, style: .continuous)
+                // Thin, clear glass: the notebooks behind it stay easy to make out.
                 front
                     .fill(.ultraThinMaterial)
-                    .overlay(front.fill(base.opacity(scheme == .dark ? 0.22 : 0.14)))
-                    .overlay(front.fill(LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.10 : 0.45),
+                    .opacity(scheme == .dark ? 0.55 : 0.5)
+                    .overlay(front.fill(base.opacity(scheme == .dark ? 0.12 : 0.07)))
+                    .overlay(front.fill(LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.08 : 0.28),
                                                                 Color.white.opacity(0.0)],
                                                        startPoint: .top, endPoint: .bottom)))
                     .overlay(front.strokeBorder(LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.35 : 0.9),
@@ -197,7 +202,18 @@ struct FolderCard: View {
                                 .padding(.bottom, 18)
                         }
                     }
-                    .shadow(color: .black.opacity(scheme == .dark ? 0.4 : 0.10), radius: 12, x: 0, y: 6)
+                    .overlay(alignment: .topLeading) {
+                        if subfolders > 0 {
+                            Label("\(subfolders)", systemImage: "folder.fill")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(base)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color.white.opacity(scheme == .dark ? 0.12 : 0.6)))
+                                .padding(12)
+                        }
+                    }
+                    .shadow(color: .black.opacity(scheme == .dark ? 0.3 : 0.07), radius: 12, x: 0, y: 6)
             }
             .frame(height: 170)
 
@@ -205,7 +221,7 @@ struct FolderCard: View {
                 Text(folder.name)
                     .font(.system(size: 17, weight: .medium))
                     .lineLimit(1)
-                Text("\(notebooks.count)")
+                Text("\(total ?? notebooks.count)")
                     .font(.system(size: 14, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
@@ -220,7 +236,18 @@ struct FolderCard: View {
     /// The first few notebooks, fanned out; their lower half sits behind the glass.
     @ViewBuilder
     private var contents: some View {
-        if notebooks.isEmpty {
+        if notebooks.isEmpty && subfolders > 0 {
+            // Only subfolders inside: show little folder tabs peeking out.
+            HStack(spacing: -22) {
+                ForEach(0..<min(subfolders, 3), id: \.self) { i in
+                    FolderShape()
+                        .fill(base.opacity(0.55 - Double(i) * 0.12))
+                        .frame(width: 80, height: 64)
+                        .rotationEffect(.degrees(Double(i - 1) * 6))
+                        .offset(y: i == 1 ? -6 : 0)
+                }
+            }
+        } else if notebooks.isEmpty {
             ZStack {
                 ForEach(0..<2, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 6, style: .continuous)

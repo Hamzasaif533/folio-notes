@@ -51,7 +51,17 @@ shot "07-new-menu-portrait-light" -FolioShowNew
 shot "08-sidebar-portrait-light" -FolioOpenFirst -FolioSidebar
 shot "09-dock-left-portrait-light" -FolioOpenFirst -FolioDockLeft
 shot "10-focus-portrait-light" -FolioOpenFirst -FolioFocus
+shot "11-add-menu-portrait-light" -FolioOpenFirst -FolioShowAdd
+shot "12-more-menu-portrait-light" -FolioOpenFirst -FolioShowMore
+shot "13-customize-portrait-light" -FolioOpenFirst -FolioCustomize
+shot "14-zoom-box-portrait-light" -FolioOpenFirst -FolioZoomBox
+shot "15-objects-portrait-light" -FolioOpenFirst -FolioTextTool -FolioColorsBottom
+shot "16-nested-folder-portrait-light" -FolioOpenFolder
+shot "17-all-notes-portrait-light" -FolioOpenFirst -FolioAllNotes
+shot "18-split-bars-portrait-light" -FolioOpenFirst -FolioDockLeft -FolioColorsBottom
+shot "19-horizontal-portrait-light" -FolioOpenFirst -FolioHorizontal
 xcrun simctl ui "$DEVICE" appearance dark
+shot "16-nested-folder-portrait-dark" -FolioOpenFolder
 run_set "portrait-dark"
 
 rotate

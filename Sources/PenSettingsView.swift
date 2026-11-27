@@ -6,36 +6,41 @@ struct StrokePreview: View {
     let inkType: PKInkingTool.InkType
     let color: UIColor
     let width: CGFloat
+    var feel: InkFeel = .standard
 
     var body: some View {
         GeometryReader { geo in
             if geo.size.width > 40, geo.size.height > 10 {
-                Image(uiImage: Self.render(inkType: inkType, color: color, width: width, size: geo.size))
+                Image(uiImage: Self.render(inkType: inkType, color: color, width: width, size: geo.size, feel: feel))
             }
         }
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.black.opacity(0.08), lineWidth: 1))
     }
 
-    static func render(inkType: PKInkingTool.InkType, color: UIColor, width: CGFloat, size: CGSize) -> UIImage {
+    static func render(inkType: PKInkingTool.InkType, color: UIColor, width: CGFloat, size: CGSize,
+                       feel: InkFeel = .standard) -> UIImage {
         let ink = PKInk(inkType, color: color)
         var points: [PKStrokePoint] = []
         let n = 80
         for i in 0...n {
             let t = CGFloat(i) / CGFloat(n)
             let x = 20 + t * (size.width - 40)
-            let y = size.height / 2 + sin(t * .pi * 2) * size.height * 0.22
+            // A slightly shaky line, so stabilization has something to smooth.
+            let wobble = sin(t * 90) * 1.2
+            let y = size.height / 2 + sin(t * .pi * 2) * size.height * 0.22 + wobble
             let force = 0.3 + 1.2 * sin(t * .pi)
+            let w = width * (0.55 + 0.75 * force / 1.5)
             points.append(PKStrokePoint(location: CGPoint(x: x, y: y),
                                         timeOffset: TimeInterval(t),
-                                        size: CGSize(width: width, height: width),
+                                        size: CGSize(width: w, height: w),
                                         opacity: 1,
                                         force: force,
                                         azimuth: 0,
                                         altitude: .pi / 2))
         }
         let path = PKStrokePath(controlPoints: points, creationDate: Date())
-        let stroke = PKStroke(ink: ink, path: path, transform: .identity, mask: nil)
+        let stroke = StrokeShaper.apply(feel, to: PKStroke(ink: ink, path: path, transform: .identity, mask: nil))
         let drawing = PKDrawing(strokes: [stroke])
         var image = UIImage()
         UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
@@ -352,7 +357,8 @@ struct PenSettingsView: View {
                     .font(.system(size: 22, weight: .regular, design: .serif))
                     .frame(maxWidth: .infinity)
                     .contentTransition(.opacity)
-                StrokePreview(inkType: tools.pen.kind.inkType, color: tools.pen.uiColor, width: tools.pen.width)
+                StrokePreview(inkType: tools.pen.kind.inkType, color: tools.pen.uiColor, width: tools.pen.width,
+                              feel: tools.pen.inkFeel)
                     .frame(height: 76)
 
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
@@ -360,6 +366,8 @@ struct PenSettingsView: View {
                         penTile(k)
                     }
                 }
+
+                feelSection
 
                 HStack {
                     label("Thickness")
@@ -432,6 +440,42 @@ struct PenSettingsView: View {
         .frame(width: 360, height: 680)
         .animation(.snappy(duration: 0.22), value: tools.pen.kind)
         .darkPanel()
+    }
+
+    /// GoodNotes-style pen customisation.
+    private var feelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                label("Pen Feel")
+                Spacer()
+                if !tools.pen.inkFeel.isStandard {
+                    Button("Reset") { withAnimation(.snappy) { tools.pen.inkFeel = .standard } }
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            feelSlider("Tip Sharpness", value: $tools.pen.inkFeel.tipSharpness, low: "Round", high: "Sharp")
+            feelSlider("Pressure Sensitivity", value: $tools.pen.inkFeel.pressure, low: "Even", high: "Strong")
+            feelSlider("Tip Flatness", value: $tools.pen.inkFeel.tipFlatness, low: "Round", high: "Flat")
+            feelSlider("Stroke Stabilization", value: $tools.pen.inkFeel.stabilization, low: "Off", high: "Smooth")
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.06)))
+    }
+
+    private func feelSlider(_ title: String, value: Binding<Double>, low: String, high: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(Int((value.wrappedValue * 100).rounded()))%")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Text(low).font(.caption2).foregroundStyle(.secondary).frame(width: 40, alignment: .leading)
+                Slider(value: value, in: 0...1)
+                Text(high).font(.caption2).foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+            }
+        }
     }
 
     private func penTile(_ k: InkKind) -> some View {

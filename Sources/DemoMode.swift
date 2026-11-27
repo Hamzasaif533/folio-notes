@@ -15,6 +15,19 @@ enum DemoMode {
     static var sidebar: Bool { args.contains("-FolioSidebar") }
     static var openCanvas: Bool { args.contains("-FolioOpenCanvas") }
     static var showNew: Bool { args.contains("-FolioShowNew") }
+    static var openFolder: Bool { args.contains("-FolioOpenFolder") }
+    static var showAdd: Bool { args.contains("-FolioShowAdd") }
+    static var showMore: Bool { args.contains("-FolioShowMore") }
+    static var customize: Bool { args.contains("-FolioCustomize") }
+    static var zoomBox: Bool { args.contains("-FolioZoomBox") }
+    static var horizontal: Bool { args.contains("-FolioHorizontal") }
+    static var allNotes: Bool { args.contains("-FolioAllNotes") }
+    static var textTool: Bool { args.contains("-FolioTextTool") }
+    static var colorsDock: ToolbarDock? {
+        if args.contains("-FolioColorsBottom") { return .bottom }
+        if args.contains("-FolioColorsRight") { return .right }
+        return nil
+    }
     static var dock: ToolbarDock? {
         if args.contains("-FolioDockLeft") { return .left }
         if args.contains("-FolioDockBottom") { return .bottom }
@@ -29,10 +42,12 @@ enum DemoMode {
         let uni = store.createFolder(name: "University", colorIndex: 0, icon: "graduationcap.fill")
         let personal = store.createFolder(name: "Personal", colorIndex: 2, icon: "heart.fill")
         let projects = store.createFolder(name: "Projects", colorIndex: 4, icon: "briefcase.fill")
+        let year2 = store.createFolder(name: "Year 2", colorIndex: 1, icon: "books.vertical.fill", parentId: uni.id)
+        _ = store.createFolder(name: "Labs", colorIndex: 3, icon: "flask.fill", parentId: uni.id)
 
         let specs: [(String, UUID?, Int, CoverPattern, PageTemplate)] = [
             ("Radio Receivers", uni.id, 1, .waves, .ruled),
-            ("Aircraft Structures", uni.id, 6, .plain, .cornell),
+            ("Aircraft Structures", year2.id, 6, .plain, .cornell),
             ("Journal", personal.id, 5, .dots, .dotted),
             ("Sketchbook", personal.id, 8, .linen, .blank),
             ("App Ideas", projects.id, 9, .grid, .grid),
@@ -46,6 +61,9 @@ enum DemoMode {
             if title == firstTitle || title == "Journal" { store.setStarred(nb.id, true) }
             if title == firstTitle {
                 store.saveDrawing(sampleDrawing(), notebookId: nb.id, pageId: nb.pages[0])
+                store.saveElements(sampleObjects(), notebookId: nb.id, pageId: nb.pages[0])
+                store.toggleBookmark(notebookId: nb.id, pageId: nb.pages[0])
+                store.setOutline(notebookId: nb.id, pageId: nb.pages[0], title: "Waves")
                 if let p2 = store.insertPage(notebookId: nb.id, at: 1) {
                     store.saveDrawing(sampleDrawing(), notebookId: nb.id, pageId: p2)
                 }
@@ -59,6 +77,16 @@ enum DemoMode {
         // Strokes around the middle of the board, where the canvas opens.
         let mid = CGAffineTransform(translationX: 10000 - 360, y: 10000 - 400)
         store.saveDrawing(sampleDrawing().transformed(using: mid), notebookId: board.id, pageId: board.pages[0])
+    }
+
+    /// A text box, sticky note, tape strip, sticker and emoji for the screenshots.
+    static func sampleObjects() -> [PageElement] {
+        [PageElement(kind: .text, x: 80, y: 90, w: 520, h: 56, text: "Lecture 4: Waves", colorHex: "#1F3BB3", fontSize: 36),
+         PageElement(kind: .emoji, x: 640, y: 80, w: 80, h: 80, colorHex: "#F5B700", symbol: "star.fill"),
+         PageElement(kind: .sticky, x: 500, y: 760, w: 230, h: 210, text: "Exam Friday!\nReview chapter 3",
+                     colorHex: "#FFE680", fontSize: 26),
+         PageElement(kind: .emoji, x: 120, y: 800, w: 90, h: 90, text: "💡"),
+         PageElement(kind: .tape, x: 360, y: 390, w: 300, h: 34, colorHex: "#FFB8D1")]
     }
 
     /// A few strokes in different pens and colours, to check ink visibility.

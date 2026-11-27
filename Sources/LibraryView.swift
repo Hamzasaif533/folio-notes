@@ -20,9 +20,10 @@ struct LibraryView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView(selection: $selection,
-                        onNewFolder: { folderSheet = .create },
+                        onNewFolder: { folderSheet = .create(parent: nil) },
                         onEditFolder: { folderSheet = .edit($0) },
-                        onDeleteFolder: { deletingFolder = $0 })
+                        onDeleteFolder: { deletingFolder = $0 },
+                        onNewSubfolder: { folderSheet = .create(parent: $0) })
                 .navigationSplitViewColumnWidth(min: 290, ideal: 320, max: 360)
                 .toolbar(.hidden, for: .navigationBar)
         } detail: {
@@ -32,7 +33,7 @@ struct LibraryView: View {
                               onOpen: open,
                               onNewNotebook: { notebookSheet = .create(folderId: $0, kind: $1) },
                               onQuickNote: quickNote,
-                              onNewFolder: { folderSheet = .create },
+                              onNewFolder: { folderSheet = .create(parent: $0) },
                               onEditNotebook: { notebookSheet = .edit($0) },
                               onEditFolder: { folderSheet = .edit($0) },
                               onDeleteFolder: { deletingFolder = $0 })
@@ -40,10 +41,13 @@ struct LibraryView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .fullScreenCover(item: $openNotebook) { nb in
-            EditorView(notebook: nb)
+            // No zoom transition here: on iPadOS 18+ it lets a pinch or swipe
+            // close the notebook. Only the back arrow leaves the editor.
+            EditorView(notebook: nb, onSwitch: { other in switchNotebook(to: other) })
+                .id(nb.id)
                 .environmentObject(store)
                 .environmentObject(tools)
-                .zoomTransition(id: nb.id, in: zoomNS)
+                .interactiveDismissDisabled(true)
         }
         .sheet(item: $notebookSheet) { mode in
             NotebookSheet(mode: mode) { nb in
@@ -71,6 +75,12 @@ struct LibraryView: View {
         openNotebook = store.notebook(nb.id) ?? nb
     }
 
+    /// From the editor's "All Notes" panel: close this notebook and open another.
+    private func switchNotebook(to nb: Notebook) {
+        openNotebook = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { open(nb) }
+    }
+
     /// Creates a notebook (or canvas) with default settings and opens it straight away.
     private func quickNote(_ kind: NotebookKind) {
         var folderId: UUID?
@@ -92,6 +102,9 @@ struct LibraryView: View {
         didRunDemo = true
         DemoMode.seedIfNeeded(store)
         if DemoMode.showFolders { selection = .folders }
+        if DemoMode.openFolder, let uni = store.folders.first(where: { $0.name == "University" }) {
+            selection = .folder(uni.id)
+        }
         if DemoMode.openFirst, let first = store.activeNotebooks.first(where: { $0.title == DemoMode.firstTitle }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(first) }
         }
@@ -109,6 +122,7 @@ struct SidebarView: View {
     let onNewFolder: () -> Void
     let onEditFolder: (Folder) -> Void
     let onDeleteFolder: (Folder) -> Void
+    var onNewSubfolder: (UUID) -> Void = { _ in }
     @State private var foldersExpanded = true
 
     var body: some View {
@@ -164,8 +178,8 @@ struct SidebarView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    ForEach(store.folders) { f in
-                        folderRow(f)
+                    ForEach(store.folderTree(), id: \.folder.id) { item in
+                        folderRow(item.folder, depth: item.depth)
                             .transition(.move(edge: .leading).combined(with: .opacity))
                     }
                 }
@@ -207,22 +221,28 @@ struct SidebarView: View {
         .buttonStyle(PressableStyle(scale: 0.95))
     }
 
-    private func folderRow(_ f: Folder) -> some View {
+    private func folderRow(_ f: Folder, depth: Int) -> some View {
         let selected = selection == .folder(f.id)
         let color = Color(hex: Theme.folderColors[abs(f.colorIndex) % Theme.folderColors.count])
         return Button { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } } label: {
             HStack(spacing: 12) {
+                if depth > 0 {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, CGFloat(depth - 1) * 18)
+                }
                 Image(systemName: f.icon)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: depth > 0 ? 12 : 14, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 30, height: 30)
+                    .frame(width: depth > 0 ? 26 : 30, height: depth > 0 ? 26 : 30)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(color))
                 Text(f.name)
-                    .font(.system(size: 17))
+                    .font(.system(size: depth > 0 ? 16 : 17))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Spacer()
-                Text("\(store.notebooks(in: f.id).count)")
+                Text("\(store.notebookCount(inTree: f.id))")
                     .font(.subheadline.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -234,9 +254,33 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button { onEditFolder(f) } label: { Label("Edit Folder", systemImage: "pencil") }
-            Button(role: .destructive) { onDeleteFolder(f) } label: { Label("Delete Folder", systemImage: "trash") }
+            FolderMenu(store: store, folder: f, onEdit: onEditFolder, onDelete: onDeleteFolder, onNewSubfolder: onNewSubfolder)
         }
+    }
+}
+
+/// Folder context menu: edit, new subfolder, move into another folder, delete.
+struct FolderMenu: View {
+    let store: LibraryStore
+    let folder: Folder
+    let onEdit: (Folder) -> Void
+    let onDelete: (Folder) -> Void
+    let onNewSubfolder: (UUID) -> Void
+
+    var body: some View {
+        Button { onEdit(folder) } label: { Label("Edit Folder", systemImage: "pencil") }
+        Button { onNewSubfolder(folder.id) } label: { Label("New Folder Inside", systemImage: "folder.badge.plus") }
+        Menu {
+            let blocked = store.descendants(of: folder.id).union([folder.id])
+            Button("Top Level") { store.moveFolder(folder.id, to: nil) }
+            ForEach(store.folderTree().filter { !blocked.contains($0.folder.id) }, id: \.folder.id) { item in
+                Button(String(repeating: "   ", count: item.depth) + item.folder.name) {
+                    store.moveFolder(folder.id, to: item.folder.id)
+                }
+            }
+        } label: { Label("Move to…", systemImage: "folder") }
+        Divider()
+        Button(role: .destructive) { onDelete(folder) } label: { Label("Delete Folder", systemImage: "trash") }
     }
 }
 
@@ -249,7 +293,7 @@ struct NotesGridView: View {
     let onOpen: (Notebook) -> Void
     let onNewNotebook: (UUID?, NotebookKind) -> Void
     let onQuickNote: (NotebookKind) -> Void
-    let onNewFolder: () -> Void
+    let onNewFolder: (UUID?) -> Void
     let onEditNotebook: (Notebook) -> Void
     let onEditFolder: (Folder) -> Void
     let onDeleteFolder: (Folder) -> Void
@@ -297,32 +341,33 @@ struct NotesGridView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
-                Text(title)
-                    .font(.system(size: 40, weight: .regular, design: .serif))
-                    .lineLimit(1)
-                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    if let id = currentFolderId {
+                        breadcrumb(id)
+                    }
+                    Text(title)
+                        .font(.system(size: 40, weight: .regular, design: .serif))
+                        .lineLimit(1)
+                }
+                .padding(.top, 2)
 
                 Group {
                     if selection == .folders && query.isEmpty {
-                        foldersGrid
+                        foldersGrid(parent: nil)
+                    } else if let id = currentFolderId {
+                        let hasSubfolders = !store.subfolders(of: id).isEmpty
+                        if query.isEmpty {
+                            foldersGrid(parent: id, compact: true)
+                        }
+                        if items.isEmpty {
+                            if !hasSubfolders || !query.isEmpty { emptyState }
+                        } else {
+                            notebookGrid
+                        }
                     } else if items.isEmpty {
                         emptyState
                     } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: largeTiles ? 210 : 158,
-                                                               maximum: largeTiles ? 260 : 196), spacing: 30)],
-                                  alignment: .leading, spacing: 36) {
-                            ForEach(Array(items.enumerated()), id: \.element.id) { i, nb in
-                                Button {
-                                    if !nb.isTrashed { onOpen(nb) }
-                                } label: {
-                                    NotebookTile(notebook: nb, zoomNS: zoomNS)
-                                }
-                                .buttonStyle(PressableStyle(scale: 0.95))
-                                .contextMenu { menu(for: nb) }
-                                .staggeredAppear(i)
-                                .transition(.scale(scale: 0.85).combined(with: .opacity))
-                            }
-                        }
+                        notebookGrid
                     }
                 }
                 .id(selection)
@@ -343,13 +388,13 @@ struct NotesGridView: View {
                     Button("Empty Trash", role: .destructive) { confirmEmptyTrash = true }
                         .disabled(store.trashedNotebooks.isEmpty)
                 } else if selection == .folders {
-                    ProminentButton(title: "New Folder", systemImage: "plus", action: onNewFolder)
+                    ProminentButton(title: "New Folder", systemImage: "plus") { onNewFolder(nil) }
                 } else {
                     ProminentButton(title: "New", systemImage: "plus") { showNewMenu = true }
                         .popover(isPresented: $showNewMenu, arrowEdge: .top) {
                             NewMenu(onNotebook: { pick { onNewNotebook(currentFolderId, .paged) } },
                                     onCanvas: { pick { onNewNotebook(currentFolderId, .canvas) } },
-                                    onFolder: { pick(onNewFolder) },
+                                    onFolder: { pick { onNewFolder(currentFolderId) } },
                                     onQuickNote: { pick { onQuickNote(.paged) } },
                                     onQuickCanvas: { pick { onQuickNote(.canvas) } })
                         }
@@ -411,35 +456,77 @@ struct NotesGridView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: action)
     }
 
-    private var foldersGrid: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 28)],
+    private var notebookGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: largeTiles ? 210 : 158,
+                                               maximum: largeTiles ? 260 : 196), spacing: 30)],
+                  alignment: .leading, spacing: 36) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { i, nb in
+                Button {
+                    if !nb.isTrashed { onOpen(nb) }
+                } label: {
+                    NotebookTile(notebook: nb, zoomNS: zoomNS)
+                }
+                .buttonStyle(PressableStyle(scale: 0.95))
+                .contextMenu { menu(for: nb) }
+                .staggeredAppear(i)
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
+            }
+        }
+    }
+
+    /// "‹ Folders › University" above a folder's title; tap a crumb to go up.
+    private func breadcrumb(_ id: UUID) -> some View {
+        var chain: [Folder] = []
+        var cur = store.folder(id)?.parentId
+        while let c = cur, let f = store.folder(c), chain.count < 12 {
+            chain.insert(f, at: 0)
+            cur = f.parentId
+        }
+        return HStack(spacing: 6) {
+            Button { withAnimation(.snappy(duration: 0.28)) { selection = .folders } } label: {
+                Label("Folders", systemImage: "chevron.left").font(.subheadline.weight(.medium))
+            }
+            ForEach(chain) { f in
+                Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                Button(f.name) { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } }
+                    .font(.subheadline.weight(.medium))
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.action)
+    }
+
+    /// Folders at one level (top level, or the subfolders of a folder).
+    private func foldersGrid(parent: UUID?, compact: Bool = false) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: compact ? 180 : 200, maximum: compact ? 220 : 260), spacing: 28)],
                   alignment: .leading, spacing: 30) {
-            ForEach(Array(store.folders.enumerated()), id: \.element.id) { i, f in
+            ForEach(Array(store.subfolders(of: parent).enumerated()), id: \.element.id) { i, f in
                 Button { withAnimation(.snappy(duration: 0.28)) { selection = .folder(f.id) } } label: {
-                    FolderCard(folder: f, notebooks: store.notebooks(in: f.id))
+                    FolderCard(folder: f, notebooks: store.notebooks(in: f.id),
+                               subfolders: store.subfolders(of: f.id).count,
+                               total: store.notebookCount(inTree: f.id))
                 }
                 .buttonStyle(PressableStyle(scale: 0.95))
                 .contextMenu {
-                    Button { onEditFolder(f) } label: { Label("Edit Folder", systemImage: "pencil") }
-                    Button(role: .destructive) { onDeleteFolder(f) } label: { Label("Delete Folder", systemImage: "trash") }
+                    FolderMenu(store: store, folder: f, onEdit: onEditFolder, onDelete: onDeleteFolder,
+                               onNewSubfolder: { onNewFolder($0) })
                 }
                 .staggeredAppear(i)
             }
-            Button(action: onNewFolder) {
+            Button { onNewFolder(parent) } label: {
                 VStack(spacing: 10) {
-                    Image(systemName: "folder.badge.plus").font(.system(size: 34, weight: .light))
-                    Text("New Folder").font(.subheadline.weight(.medium))
+                    Image(systemName: "folder.badge.plus").font(.system(size: compact ? 28 : 34, weight: .light))
+                    Text(parent == nil ? "New Folder" : "New Folder Here").font(.subheadline.weight(.medium))
                 }
                 .foregroundStyle(Theme.action)
                 .frame(maxWidth: .infinity)
-                .frame(height: 170)
+                .frame(height: compact ? 130 : 170)
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .strokeBorder(Theme.action.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
             }
             .buttonStyle(PressableStyle(scale: 0.95))
         }
     }
-
     private var emptyState: some View {
         VStack(spacing: 14) {
             Image(systemName: selection == .trash ? "trash" : (selection == .starred ? "star" : "book.closed"))
@@ -487,8 +574,10 @@ struct NotesGridView: View {
             Button { onEditNotebook(nb) } label: { Label("Cover & Paper", systemImage: "paintpalette") }
             Menu {
                 Button("Unfiled") { store.moveNotebook(nb.id, to: nil) }
-                ForEach(store.folders) { f in
-                    Button(f.name) { store.moveNotebook(nb.id, to: f.id) }
+                ForEach(store.folderTree(), id: \.folder.id) { item in
+                    Button(String(repeating: "   ", count: item.depth) + item.folder.name) {
+                        store.moveNotebook(nb.id, to: item.folder.id)
+                    }
                 }
             } label: { Label("Move to Folder", systemImage: "folder") }
             Button { store.duplicateNotebook(nb.id) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }

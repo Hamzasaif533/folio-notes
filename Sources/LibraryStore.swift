@@ -101,8 +101,9 @@ final class LibraryStore: ObservableObject {
     // MARK: Folders
 
     @discardableResult
-    func createFolder(name: String, colorIndex: Int, icon: String) -> Folder {
-        let f = Folder(name: name.isEmpty ? "New Folder" : name, colorIndex: colorIndex, icon: icon)
+    func createFolder(name: String, colorIndex: Int, icon: String, parentId: UUID? = nil) -> Folder {
+        var f = Folder(name: name.isEmpty ? "New Folder" : name, colorIndex: colorIndex, icon: icon)
+        f.parentId = parentId.flatMap { folder($0) == nil ? nil : $0 }
         folders.append(f)
         persist()
         return f
@@ -110,16 +111,93 @@ final class LibraryStore: ObservableObject {
 
     func updateFolder(_ folder: Folder) {
         guard let i = folders.firstIndex(where: { $0.id == folder.id }) else { return }
-        folders[i] = folder
+        var f = folder
+        // A folder can't sit inside itself or one of its own subfolders.
+        if let p = f.parentId, p == f.id || descendants(of: f.id).contains(p) { f.parentId = folders[i].parentId }
+        folders[i] = f
         persist()
     }
 
-    func deleteFolder(_ id: UUID, deleteNotebooks: Bool) {
-        for i in notebooks.indices where notebooks[i].folderId == id {
-            notebooks[i].folderId = nil
-            if deleteNotebooks && notebooks[i].trashedAt == nil { notebooks[i].trashedAt = Date() }
+    /// Folders directly inside `parent` (nil = top level).
+    func subfolders(of parent: UUID?) -> [Folder] {
+        folders.filter { $0.parentId == parent }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Every folder below this one, at any depth.
+    func descendants(of id: UUID) -> Set<UUID> {
+        var result = Set<UUID>()
+        var queue = [id]
+        while let next = queue.popLast() {
+            for f in folders where f.parentId == next && !result.contains(f.id) {
+                result.insert(f.id)
+                queue.append(f.id)
+            }
         }
-        folders.removeAll { $0.id == id }
+        return result
+    }
+
+    /// Folders in tree order with their depth, for the sidebar and pickers.
+    func folderTree() -> [(folder: Folder, depth: Int)] {
+        var out: [(folder: Folder, depth: Int)] = []
+        func walk(_ parent: UUID?, _ depth: Int) {
+            for f in subfolders(of: parent) {
+                out.append((folder: f, depth: depth))
+                if depth < 12 { walk(f.id, depth + 1) }
+            }
+        }
+        walk(nil, 0)
+        // Folders whose parent went missing still show up at the top level.
+        let shown = Set(out.map { $0.folder.id })
+        for f in folders where !shown.contains(f.id) { out.append((folder: f, depth: 0)) }
+        return out
+    }
+
+    /// "University › Year 2 › Physics"
+    func folderPath(_ id: UUID) -> String {
+        var names: [String] = []
+        var cur: UUID? = id
+        var guardCount = 0
+        while let c = cur, let f = folder(c), guardCount < 20 {
+            names.insert(f.name, at: 0)
+            cur = f.parentId
+            guardCount += 1
+        }
+        return names.joined(separator: " › ")
+    }
+
+    func moveFolder(_ id: UUID, to parent: UUID?) {
+        guard let i = folders.firstIndex(where: { $0.id == id }) else { return }
+        if let p = parent, p == id || descendants(of: id).contains(p) { return }
+        folders[i].parentId = parent
+        persist()
+    }
+
+    /// Notebooks in this folder and all of its subfolders.
+    func notebookCount(inTree id: UUID) -> Int {
+        let ids = descendants(of: id).union([id])
+        return activeNotebooks.filter { $0.folderId.map(ids.contains) ?? false }.count
+    }
+
+    func deleteFolder(_ id: UUID, deleteNotebooks: Bool) {
+        let parent = folder(id)?.parentId
+        let tree = descendants(of: id).union([id])
+        for i in notebooks.indices {
+            guard let f = notebooks[i].folderId, tree.contains(f) else { continue }
+            if deleteNotebooks {
+                notebooks[i].folderId = nil
+                if notebooks[i].trashedAt == nil { notebooks[i].trashedAt = Date() }
+            } else if f == id {
+                notebooks[i].folderId = parent
+            }
+        }
+        if deleteNotebooks {
+            folders.removeAll { tree.contains($0.id) }
+        } else {
+            // Keep the subfolders: they move up one level.
+            for i in folders.indices where folders[i].parentId == id { folders[i].parentId = parent }
+            folders.removeAll { $0.id == id }
+        }
         persist()
     }
 
@@ -170,11 +248,110 @@ final class LibraryStore: ObservableObject {
         copy.createdAt = Date()
         copy.modifiedAt = Date()
         copy.pages = src.pages.map { _ in UUID() }
+        var map: [UUID: UUID] = [:]
         for (old, new) in zip(src.pages, copy.pages) {
-            saveDrawing(loadDrawing(notebookId: src.id, pageId: old), notebookId: copy.id, pageId: new)
+            map[old] = new
+            copyPageFiles(from: src.id, page: old, to: copy.id, page: new)
         }
+        copy.bookmarks = src.bookmarks?.compactMap { map[$0] }
+        copy.outline = src.outline?.compactMap { e in map[e.pageId].map { OutlineEntry(pageId: $0, title: e.title) } }
         notebooks.append(copy)
         persist()
+    }
+
+    // MARK: Bookmarks & outline
+
+    func toggleBookmark(notebookId: UUID, pageId: UUID) {
+        guard let i = notebooks.firstIndex(where: { $0.id == notebookId }) else { return }
+        var list = notebooks[i].bookmarks ?? []
+        if let k = list.firstIndex(of: pageId) { list.remove(at: k) } else { list.append(pageId) }
+        notebooks[i].bookmarks = list
+        persist()
+    }
+
+    /// Adds, renames or (with nil) removes a page from the outline.
+    func setOutline(notebookId: UUID, pageId: UUID, title: String?) {
+        guard let i = notebooks.firstIndex(where: { $0.id == notebookId }) else { return }
+        var list = notebooks[i].outline ?? []
+        list.removeAll { $0.pageId == pageId }
+        if let title, !title.trimmingCharacters(in: .whitespaces).isEmpty {
+            list.append(OutlineEntry(pageId: pageId, title: title))
+            let order = notebooks[i].pages
+            list.sort { (order.firstIndex(of: $0.pageId) ?? 0) < (order.firstIndex(of: $1.pageId) ?? 0) }
+        }
+        notebooks[i].outline = list
+        persist()
+    }
+
+    // MARK: Page objects & backgrounds
+
+    private func elementsURL(_ nb: UUID, _ page: UUID) -> URL {
+        notebookDir(nb).appendingPathComponent(page.uuidString + ".elements.json")
+    }
+
+    private func backgroundURL(_ nb: UUID, _ page: UUID) -> URL {
+        notebookDir(nb).appendingPathComponent(page.uuidString + ".bg.jpg")
+    }
+
+    func loadElements(notebookId: UUID, pageId: UUID) -> [PageElement] {
+        guard let data = try? Data(contentsOf: elementsURL(notebookId, pageId)),
+              let list = try? JSONDecoder().decode([PageElement].self, from: data) else { return [] }
+        return list
+    }
+
+    func saveElements(_ list: [PageElement], notebookId: UUID, pageId: UUID) {
+        let url = elementsURL(notebookId, pageId)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if list.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+        } else if let data = try? JSONEncoder().encode(list) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    func loadBackground(notebookId: UUID, pageId: UUID) -> UIImage? {
+        UIImage(contentsOfFile: backgroundURL(notebookId, pageId).path)
+    }
+
+    func hasBackground(notebookId: UUID, pageId: UUID) -> Bool {
+        FileManager.default.fileExists(atPath: backgroundURL(notebookId, pageId).path)
+    }
+
+    func saveBackground(_ image: UIImage, notebookId: UUID, pageId: UUID) {
+        let url = backgroundURL(notebookId, pageId)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? image.jpegData(compressionQuality: 0.86)?.write(to: url, options: .atomic)
+    }
+
+    /// Saves a photo placed on a page; returns the file name to keep in the element.
+    func saveImageAsset(_ image: UIImage, notebookId: UUID) -> String? {
+        let name = UUID().uuidString + ".jpg"
+        let url = notebookDir(notebookId).appendingPathComponent(name)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let scaled = image.scaledDown(maxSide: 2200)
+        guard let data = scaled.jpegData(compressionQuality: 0.85) else { return nil }
+        do { try data.write(to: url, options: .atomic) } catch { return nil }
+        return name
+    }
+
+    func loadImageAsset(_ name: String, notebookId: UUID) -> UIImage? {
+        UIImage(contentsOfFile: notebookDir(notebookId).appendingPathComponent(name).path)
+    }
+
+    private func copyPageFiles(from srcNb: UUID, page srcPage: UUID, to dstNb: UUID, page dstPage: UUID) {
+        saveDrawing(loadDrawing(notebookId: srcNb, pageId: srcPage), notebookId: dstNb, pageId: dstPage)
+        if let bg = loadBackground(notebookId: srcNb, pageId: srcPage) {
+            saveBackground(bg, notebookId: dstNb, pageId: dstPage)
+        }
+        var elements = loadElements(notebookId: srcNb, pageId: srcPage)
+        for i in elements.indices {
+            elements[i].id = UUID()
+            if let file = elements[i].imageFile, srcNb != dstNb,
+               let img = loadImageAsset(file, notebookId: srcNb) {
+                elements[i].imageFile = saveImageAsset(img, notebookId: dstNb)
+            }
+        }
+        saveElements(elements, notebookId: dstNb, pageId: dstPage)
     }
 
     // MARK: Pages
@@ -218,9 +395,26 @@ final class LibraryStore: ObservableObject {
     func deletePage(notebookId: UUID, pageId: UUID) {
         guard let i = notebooks.firstIndex(where: { $0.id == notebookId }) else { return }
         notebooks[i].pages.removeAll { $0 == pageId }
+        notebooks[i].bookmarks?.removeAll { $0 == pageId }
+        notebooks[i].outline?.removeAll { $0.pageId == pageId }
         notebooks[i].modifiedAt = Date()
-        try? FileManager.default.removeItem(at: pageURL(notebookId: notebookId, pageId: pageId))
+        let fm = FileManager.default
+        try? fm.removeItem(at: pageURL(notebookId: notebookId, pageId: pageId))
+        try? fm.removeItem(at: elementsURL(notebookId, pageId))
+        try? fm.removeItem(at: backgroundURL(notebookId, pageId))
         persist()
+    }
+
+    /// Copies a page (ink, objects and background) and puts the copy right after it.
+    func duplicatePage(notebookId: UUID, pageId: UUID) -> UUID? {
+        guard let i = notebooks.firstIndex(where: { $0.id == notebookId }),
+              let at = notebooks[i].pages.firstIndex(of: pageId) else { return nil }
+        let new = UUID()
+        copyPageFiles(from: notebookId, page: pageId, to: notebookId, page: new)
+        notebooks[i].pages.insert(new, at: at + 1)
+        notebooks[i].modifiedAt = Date()
+        persist()
+        return new
     }
 
     func movePage(notebookId: UUID, from: Int, to: Int) {

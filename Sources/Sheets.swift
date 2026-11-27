@@ -179,11 +179,12 @@ struct NotebookSheet: View {
 }
 
 enum FolderSheetMode: Identifiable {
-    case create
+    /// A new folder, optionally inside another one.
+    case create(parent: UUID?)
     case edit(Folder)
     var id: String {
         switch self {
-        case .create: return "create"
+        case .create(let p): return "create-\(p?.uuidString ?? "top")"
         case .edit(let f): return f.id.uuidString
         }
     }
@@ -197,7 +198,15 @@ struct FolderSheet: View {
     @State private var name = ""
     @State private var colorIndex = 0
     @State private var icon = "folder.fill"
+    @State private var parentId: UUID?
     @State private var loaded = false
+
+    /// Folders this one may go inside (not itself or its own subfolders).
+    private var parentChoices: [(folder: Folder, depth: Int)] {
+        var blocked = Set<UUID>()
+        if case .edit(let f) = mode { blocked = store.descendants(of: f.id).union([f.id]) }
+        return store.folderTree().filter { !blocked.contains($0.folder.id) }
+    }
 
     var body: some View {
         NavigationStack {
@@ -214,6 +223,16 @@ struct FolderSheet: View {
                 }
                 Section("Name") {
                     TextField("Folder name", text: $name)
+                }
+                Section("Inside") {
+                    Picker("Location", selection: $parentId) {
+                        Label("Top Level", systemImage: "square.stack.3d.up").tag(UUID?.none)
+                        ForEach(parentChoices, id: \.folder.id) { item in
+                            Text(String(repeating: "    ", count: item.depth) + item.folder.name)
+                                .tag(UUID?.some(item.folder.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
                 }
                 Section("Color") {
                     HStack(spacing: 12) {
@@ -252,12 +271,15 @@ struct FolderSheet: View {
             .onAppear {
                 guard !loaded else { return }
                 loaded = true
-                if case .edit(let f) = mode {
+                switch mode {
+                case .edit(let f):
                     name = f.name
                     colorIndex = f.colorIndex
                     icon = f.icon
-                } else {
+                    parentId = f.parentId
+                case .create(let parent):
                     colorIndex = store.folders.count % Theme.folderColors.count
+                    parentId = parent
                 }
             }
         }
@@ -271,12 +293,13 @@ struct FolderSheet: View {
     private func commit() {
         switch mode {
         case .create:
-            store.createFolder(name: name, colorIndex: colorIndex, icon: icon)
+            store.createFolder(name: name, colorIndex: colorIndex, icon: icon, parentId: parentId)
         case .edit(let f):
-            var updated = f
+            var updated = store.folder(f.id) ?? f
             updated.name = name.isEmpty ? f.name : name
             updated.colorIndex = colorIndex
             updated.icon = icon
+            updated.parentId = parentId
             store.updateFolder(updated)
         }
         dismiss()

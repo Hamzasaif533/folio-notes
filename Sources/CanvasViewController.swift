@@ -121,9 +121,12 @@ final class CanvasViewController: DrawingSurfaceController {
     private var saveTask: Task<Void, Never>?
     private var isDirty = false
     private var pageId: UUID { notebook.pages.first ?? notebook.id }
+    private lazy var model = ElementModel(items: [])
+    private lazy var underLayer = ElementsLayer(model: model, overInk: false)
+    private lazy var overLayer = ElementsLayer(model: model, overInk: true)
 
     private lazy var events: CanvasEvents = {
-        let e = CanvasEvents(changed: { [weak self] _ in self?.drawingChanged() },
+        let e = CanvasEvents(changed: { [weak self] c in self?.drawingChanged(c) },
                              began: { [weak self] in self?.toolUseBegan() },
                              ended: { [weak self] in self?.toolUseEnded() })
         e.scrolled = { [weak self] _ in self?.viewportChanged() }
@@ -163,7 +166,28 @@ final class CanvasViewController: DrawingSurfaceController {
         canvas.tool = tool
         canvas.isRulerActive = rulerOn
         view.addSubview(canvas)
+        resetStrokeCount(canvas)
+
+        // Objects float above the board (photos, text, stickies, tape).
+        let nbId = notebook.id
+        let pid = pageId
+        model.items = store.loadElements(notebookId: nbId, pageId: pid)
+        let lib = self.store
+        model.imageLoader = { [weak lib] name in lib?.loadImageAsset(name, notebookId: nbId) }
+        model.onSave = { [weak self] items in
+            self?.store.saveElements(items, notebookId: nbId, pageId: pid)
+            self?.store.touch(nbId)
+        }
+        for l in [underLayer, overLayer] {
+            l.frame = view.bounds
+            l.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            l.onTouchingObject = { [weak self] active in self?.objectTouch(active) }
+            view.addSubview(l)
+        }
+        model.reloadLayers()
         installPalmRejection()
+        installOverlays()
+        refreshMode()
     }
 
     override func viewDidLayoutSubviews() {
@@ -192,6 +216,11 @@ final class CanvasViewController: DrawingSurfaceController {
                                           width: view.bounds.width / z, height: view.bounds.height / z),
                           zoom: z)
         onZoomChanged?(Int((z * 100).rounded()))
+        for l in [underLayer, overLayer] {
+            l.scale = z
+            l.origin = CGPoint(x: o.x / z, y: o.y / z)
+            l.relayout()
+        }
         if !canvas.isZooming {
             let wanted = CGSize(width: extent.width * z, height: extent.height * z)
             if abs(canvas.contentSize.width - wanted.width) > 1 || abs(canvas.contentSize.height - wanted.height) > 1 {
@@ -230,9 +259,21 @@ final class CanvasViewController: DrawingSurfaceController {
         canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
     }
 
+    override func applyCanvasEnabled(_ enabled: Bool) {
+        // The board still scrolls and zooms; it just stops taking ink.
+        canvas.drawingGestureRecognizer.isEnabled = enabled
+    }
+
+    override func objectLayers(at point: CGPoint) -> (under: ElementsLayer, over: ElementsLayer)? {
+        (underLayer, overLayer)
+    }
+
+    override var allObjectLayers: [ElementsLayer] { [underLayer, overLayer] }
+
     // MARK: Saving
 
-    private func drawingChanged() {
+    private func drawingChanged(_ c: PKCanvasView) {
+        strokeAdded(in: c)
         isDirty = true
         saveTask?.cancel()
         saveTask = Task { @MainActor [weak self] in
@@ -266,15 +307,26 @@ final class CanvasViewController: DrawingSurfaceController {
 
     func clearAll() {
         canvas.drawing = PKDrawing()
+        resetStrokeCount(canvas)
+        model.items = []
+        model.save()
+        model.reloadLayers()
         isDirty = true
         saveAll()
     }
 
-    /// The written area (plus a margin) for PDF export.
-    func drawingForExport() -> (PKDrawing, CGRect) {
+    /// The written area (ink and objects, plus a margin) for PDF export.
+    func drawingForExport() -> (PKDrawing, [PageElement], CGRect) {
         saveAll()
-        let b = canvas.drawing.bounds
+        var b = canvas.drawing.bounds
+        for e in model.items { b = b.isNull ? e.frame : b.union(e.frame) }
         let rect = (b.isNull || b.isEmpty) ? CGRect(x: 0, y: 0, width: 800, height: 1131) : b.insetBy(dx: -40, dy: -40)
-        return (canvas.drawing, rect)
+        return (canvas.drawing, model.items, rect)
+    }
+
+    var imageLoader: (String) -> UIImage? {
+        let nbId = notebook.id
+        let store = self.store
+        return { name in store.loadImageAsset(name, notebookId: nbId) }
     }
 }

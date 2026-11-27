@@ -19,6 +19,24 @@ extension View {
     }
 }
 
+extension View {
+    /// Extra-see-through glass for the editor's floating bars, so the page shows through.
+    @ViewBuilder
+    func clearGlass<S: Shape>(_ shape: S) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(Glass.clear.interactive(), in: shape)
+        } else {
+            self.background {
+                ZStack {
+                    shape.fill(.ultraThinMaterial).opacity(0.55)
+                    shape.stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
+                }
+            }
+            .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
+        }
+    }
+}
+
 @available(iOS 26.0, *)
 private func makeGlass(tint: Color?, interactive: Bool) -> Glass {
     var g: Glass = .regular
