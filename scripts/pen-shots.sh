@@ -39,6 +39,19 @@ shot "11-pdf-dark" -FolioPDFTest -FolioDarkPDF
 shot "12-calculator" -FolioOpenFirst -FolioCalc
 SHOT_WAIT=25 shot "13-browser" -FolioOpenFirst -FolioBrowser
 shot "14-paper-sheet" -FolioFeatures -FolioPaper
+
+# Files that come with the app: a small made-up course put inside the installed app.
+CONTAINER=$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" app)
+COURSE="$CONTAINER/BundledFiles/Test Course"
+mkdir -p "$COURSE/Week 1" "$COURSE/Week 2"
+sips -s format pdf shots/01-library.png --out "$COURSE/Week 1/Lecture 1 Slides.pdf" >/dev/null
+printf '<h1>Lab Sheet 2</h1><p>Measure the voltage across each resistor and fill in the table.</p>' > /tmp/lab.html
+textutil -convert docx /tmp/lab.html -output "$COURSE/Week 2/Lab Sheet 2.docx"
+ls -R "$CONTAINER/BundledFiles"
+SHOT_WAIT=12 shot "15-bundled-course" -FolioShowFolder "Test Course"
+SHOT_WAIT=12 shot "16-bundled-week2" -FolioShowFolder "Week 2"
+SHOT_WAIT=12 shot "17-bundled-pdf" -FolioOpenTitle "Lecture 1 Slides"
+shot "18-new-menu" -FolioShowNew
 xcrun simctl ui "$DEVICE" appearance dark
 shot "09-pen-test-dark" -FolioPenTest
 ls -la shots

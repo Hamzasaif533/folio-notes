@@ -9,6 +9,13 @@ extension DemoMode {
     static var paperSheet: Bool { ProcessInfo.processInfo.arguments.contains("-FolioPaper") }
     static let featuresTitle = "New in 1.12"
 
+    /// The word after a launch flag, e.g. -FolioShowFolder "Test Course".
+    static func value(after flag: String) -> String? {
+        let a = ProcessInfo.processInfo.arguments
+        guard let i = a.firstIndex(of: flag), i + 1 < a.count else { return nil }
+        return a[i + 1]
+    }
+
     /// A notebook with a 16:9 page, an A5 page and an A4 page, wide line spacing,
     /// crossing highlights and a cropped picture; plus a photo cover and a custom colour cover.
     @MainActor

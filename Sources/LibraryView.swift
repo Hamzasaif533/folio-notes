@@ -120,6 +120,17 @@ struct LibraryView: View {
         if DemoMode.openCanvas, let board = store.activeNotebooks.first(where: { $0.title == DemoMode.canvasTitle }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(board) }
         }
+        // Bundled files are added a moment after launch.
+        if let name = DemoMode.value(after: "-FolioShowFolder") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                if let f = store.folders.first(where: { $0.name == name }) { selection = .folder(f.id) }
+            }
+        }
+        if let title = DemoMode.value(after: "-FolioOpenTitle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                if let nb = store.activeNotebooks.first(where: { $0.title == title }) { open(nb) }
+            }
+        }
         for (on, title) in [(DemoMode.penTest, DemoMode.penTestTitle), (DemoMode.pdfTest, DemoMode.pdfTestTitle)] where on {
             if let nb = store.activeNotebooks.first(where: { $0.title == title }) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { open(nb) }
