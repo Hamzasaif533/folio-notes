@@ -384,7 +384,7 @@ final class LibraryStore: ObservableObject {
 
     func loadPDF(notebookId: UUID, pageId: UUID) -> PDFBackground? {
         guard let ref = pdfRef(notebookId, pageId),
-              let doc = PDFDocuments.open(notebookDir(notebookId).appendingPathComponent(ref.file)),
+              let doc = PDFDocuments.open(pdfURL(notebookId, ref.file)),
               ref.index < doc.numberOfPages else { return nil }
         return PDFBackground(ref: ref, document: doc)
     }
@@ -437,8 +437,38 @@ final class LibraryStore: ObservableObject {
         return notebooks[i]
     }
 
+    /// PDFs that came with the app are read from inside the app ("bundle:" + path), not copied.
+    static let bundlePrefix = "bundle:"
+
+    private func pdfURL(_ nb: UUID, _ file: String) -> URL {
+        if file.hasPrefix(Self.bundlePrefix), let res = Bundle.main.resourceURL {
+            return res.appendingPathComponent(String(file.dropFirst(Self.bundlePrefix.count)))
+        }
+        return notebookDir(nb).appendingPathComponent(file)
+    }
+
+    /// A notebook showing a PDF that's inside the app (nothing is copied).
+    func importBundledPDF(title: String, folderId: UUID?, relativePath: String) -> Notebook? {
+        let file = Self.bundlePrefix + relativePath
+        guard let doc = PDFDocuments.open(pdfURL(UUID(), file)), doc.numberOfPages > 0 else { return nil }
+        let count = min(doc.numberOfPages, 1000)
+        let nb = createNotebook(title: title, folderId: folderId,
+                                cover: CoverStyle(paletteIndex: Int.random(in: 0..<Theme.coverPalettes.count), pattern: .plain),
+                                template: .blank, paper: .white)
+        guard let i = notebooks.firstIndex(where: { $0.id == nb.id }) else { return nil }
+        var ids = notebooks[i].pages
+        while ids.count < count { ids.append(UUID()) }
+        notebooks[i].pages = ids
+        persist()
+        for (k, pid) in ids.enumerated() {
+            savePDFRef(PDFPageRef(file: file, index: k), notebookId: nb.id, pageId: pid)
+        }
+        return notebooks[i]
+    }
+
     /// Deletes a PDF once no page of the notebook shows it any more.
     private func removeUnusedPDF(_ file: String, notebookId: UUID) {
+        guard !file.hasPrefix(Self.bundlePrefix) else { return }
         guard let nb = notebook(notebookId) else { return }
         if nb.pages.contains(where: { pdfRef(notebookId, $0)?.file == file }) { return }
         let url = notebookDir(notebookId).appendingPathComponent(file)
@@ -458,7 +488,7 @@ final class LibraryStore: ObservableObject {
         }
         if let ref = pdfRef(srcNb, srcPage) {
             let dstPDF = notebookDir(dstNb).appendingPathComponent(ref.file)
-            if srcNb != dstNb, !fm.fileExists(atPath: dstPDF.path) {
+            if srcNb != dstNb, !ref.file.hasPrefix(Self.bundlePrefix), !fm.fileExists(atPath: dstPDF.path) {
                 try? fm.copyItem(at: notebookDir(srcNb).appendingPathComponent(ref.file), to: dstPDF)
             }
             savePDFRef(ref, notebookId: dstNb, pageId: dstPage)

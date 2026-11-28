@@ -403,8 +403,8 @@ struct NotesGridView: View {
     @State private var selecting = false
     @State private var picked: Set<UUID> = []
     @State private var confirmBulkDelete = false
-    @State private var showImport = false
     @State private var importing: String?
+    @State private var importResult: ImportResult?
     @State private var showSettings = false
 
     private var sort: SortOrder { SortOrder(rawValue: sortRaw) ?? .modified }
@@ -511,7 +511,8 @@ struct NotesGridView: View {
                                     onFolder: { pick { onNewFolder(currentFolderId) } },
                                     onQuickNote: { pick { onQuickNote(.paged) } },
                                     onQuickCanvas: { pick { onQuickNote(.canvas) } },
-                                    onImport: { pick { showImport = true } })
+                                    onImport: { pick { pickFiles() } },
+                                    onPaste: { pick { pasteFiles() } })
                         }
                 }
             }
@@ -547,10 +548,29 @@ struct NotesGridView: View {
             if DemoMode.showNew {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showNewMenu = true }
             }
+            // Files that come with the app (only in a build that has them).
+            Task { @MainActor in
+                await BundledLibrary.importIfNeeded(store: store) { p in withAnimation { importing = p } }
+                let waiting = ImportInbox.shared.pending
+                if !waiting.isEmpty, importing == nil {
+                    ImportInbox.shared.pending = []
+                    importFiles(waiting, openSingle: false)
+                }
+            }
         }
-        .fileImporter(isPresented: $showImport, allowedContentTypes: FileImporter.types) { result in
-            guard case .success(let url) = result else { return }
-            importFile(url)
+        .alert(item: $importResult) { r in
+            if r.made.count == 1, r.failed.isEmpty {
+                let nb = r.made[0]
+                return Alert(title: Text(r.title), message: Text(r.message),
+                             primaryButton: .default(Text("Open")) { onOpen(nb) },
+                             secondaryButton: .cancel(Text("Later")))
+            }
+            return Alert(title: Text(r.title), message: Text(r.message), dismissButton: .default(Text("OK")))
+        }
+        .onReceive(ImportInbox.shared.$pending) { urls in
+            guard !urls.isEmpty, importing == nil else { return }
+            ImportInbox.shared.pending = []
+            importFiles(urls, openSingle: false)
         }
         .overlay {
             if let importing {
@@ -593,22 +613,41 @@ struct NotesGridView: View {
         }
     }
 
-    /// A PDF, Word document or PowerPoint becomes a new notebook to write on (one page per page or slide).
-    private func importFile(_ url: URL) {
-        let title = url.deletingPathExtension().lastPathComponent
-        withAnimation { importing = title }
-        Task { @MainActor in
-            // A PDF is kept as the PDF itself: sharp at any zoom and small on disk.
-            if FileImporter.isPDF(url),
-               let nb = FileImporter.withAccess(to: url, { store.importPDFNotebook(title: title, folderId: currentFolderId, url: url) }) {
-                withAnimation { importing = nil }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onOpen(nb) }
+    /// Shows the file picker (several files can be picked at once).
+    private func pickFiles() {
+        let shown = DocumentPicker.present(types: FileImporter.types, multiple: true) { urls in
+            guard !urls.isEmpty else {
+                importResult = ImportResult(made: [], failed: ["the picked file (it couldn't be copied into Folio)"])
                 return
             }
-            let images = await FileImporter.pages(from: url)
+            importFiles(urls, openSingle: true)
+        }
+        if !shown { importResult = ImportResult(made: [], failed: ["the file picker couldn't open"]) }
+    }
+
+    private func pasteFiles() {
+        let urls = ImportInbox.fromClipboard()
+        if urls.isEmpty {
+            importResult = ImportResult(made: [], failed: ["the clipboard (copy a PDF first, for example with Share › Copy)"])
+        } else {
+            importFiles(urls, openSingle: true)
+        }
+    }
+
+    /// Each PDF, Word document or PowerPoint becomes a new notebook to write on (one page per page or slide).
+    private func importFiles(_ urls: [URL], openSingle: Bool) {
+        let folderId = currentFolderId
+        Task { @MainActor in
+            let r = await ImportRunner.notebooks(from: urls, folderId: folderId, store: store) { name in
+                withAnimation { importing = name }
+            }
             withAnimation { importing = nil }
-            guard let nb = store.importNotebook(title: title, folderId: currentFolderId, pages: images) else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onOpen(nb) }
+            if openSingle, r.made.count == 1, r.failed.isEmpty {
+                let nb = r.made[0]
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onOpen(nb) }
+            } else {
+                importResult = ImportResult(made: r.made, failed: r.failed)
+            }
         }
     }
 
@@ -839,6 +878,7 @@ struct NewMenu: View {
     let onQuickNote: () -> Void
     let onQuickCanvas: () -> Void
     var onImport: () -> Void = {}
+    var onPaste: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 12) {
@@ -853,6 +893,8 @@ struct NewMenu: View {
                 row("Quick Canvas", "scribble.variable", onQuickCanvas)
                 Divider().padding(.leading, 52)
                 row("Import PDF, Word or PowerPoint", "square.and.arrow.down", onImport)
+                Divider().padding(.leading, 52)
+                row("Paste PDF from Clipboard", "doc.on.clipboard", onPaste)
             }
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.07)))
         }

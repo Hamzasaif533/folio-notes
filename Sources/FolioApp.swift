@@ -5,6 +5,7 @@ struct FolioApp: App {
     @StateObject private var store = LibraryStore()
     @StateObject private var tools = ToolState()
     @StateObject private var themes = ThemeCenter()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -21,6 +22,11 @@ struct FolioApp: App {
                     ThemePickerView()
                         .environmentObject(themes)
                         .preferredColorScheme(themes.appearance.scheme)
+                }
+                // "Open in Folio" and the share sheet.
+                .onOpenURL { url in ImportInbox.shared.receive(url) }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { ImportInbox.shared.scan() }
                 }
         }
     }

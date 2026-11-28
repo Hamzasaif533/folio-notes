@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.12"
-    CURRENT_PROJECT_VERSION: "15"
+    MARKETING_VERSION: "1.13"
+    CURRENT_PROJECT_VERSION: "16"
 targets:
   Folio:
     type: application
@@ -15,6 +15,10 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+      # Files that come with the app (a private build puts course files here). Optional.
+      - path: BundledFiles
+        type: folder
+        optional: true
     info:
       path: Support/Info.plist
       properties:
@@ -24,6 +28,24 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # Folio shows up in "Open in…" and the share sheet for these files.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF Document
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.adobe.pdf]
+          - CFBundleTypeName: Word and PowerPoint
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - org.openxmlformats.wordprocessingml.document
+              - com.microsoft.word.doc
+              - org.openxmlformats.presentationml.presentation
+              - com.microsoft.powerpoint.ppt
+          - CFBundleTypeName: Image
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.image]
         UIRequiresFullScreen: false
         NSCameraUsageDescription: "Folio uses the camera to scan documents and add photos to your pages."
         NSPhotoLibraryAddUsageDescription: "Folio saves pages you export to your photo library."

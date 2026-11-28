@@ -395,22 +395,15 @@ struct EditorView: View {
                 .ignoresSafeArea()
             }
         }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: FileImporter.types) { result in
-            guard case .success(let url) = result else { return }
-            showToast("Importing \(url.lastPathComponent)…")
-            Task { @MainActor in
-                // A PDF is kept as the PDF itself: sharp at any zoom and small on disk.
-                if !isCanvas, FileImporter.isPDF(url), let pages = controller.pages {
-                    let n = FileImporter.withAccess(to: url) { pages.insertPDF(url) }
-                    if n > 0 {
-                        showToast(n == 1 ? "Page added" : "\(n) pages added")
-                        return
-                    }
-                }
-                let images = await FileImporter.pages(from: url)
-                if images.isEmpty { showToast("Couldn't open that file"); return }
-                if isCanvas { images.first.map(placePhoto) } else { addPages(images) }
+        .onChange(of: showImporter) { _, on in
+            // The iOS file picker straight from UIKit (SwiftUI's importer did nothing in LiveContainer).
+            guard on else { return }
+            showImporter = false
+            let shown = DocumentPicker.present(types: FileImporter.types, multiple: false) { urls in
+                guard let url = urls.first else { showToast("Couldn't copy that file into Folio"); return }
+                insertFile(url)
             }
+            if !shown { showToast("The file picker couldn't open") }
         }
         .alert("Go to Page", isPresented: $showGoTo) {
             TextField("Page number", text: $goToText).keyboardType(.numberPad)
@@ -1361,6 +1354,23 @@ struct EditorView: View {
         case .delete:
             pendingDeleteIndex = i
             confirmDeletePage = true
+        }
+    }
+
+    /// Adds a picked file after the current page (a PDF stays a PDF; other files become page pictures).
+    private func insertFile(_ url: URL) {
+        showToast("Importing \(url.lastPathComponent)…")
+        Task { @MainActor in
+            if !isCanvas, FileImporter.isPDF(url), let pages = controller.pages {
+                let n = pages.insertPDF(url)
+                if n > 0 {
+                    showToast(n == 1 ? "Page added" : "\(n) pages added")
+                    return
+                }
+            }
+            let images = await FileImporter.pages(from: url)
+            if images.isEmpty { showToast("Couldn't open that file"); return }
+            if isCanvas { images.first.map(placePhoto) } else { addPages(images) }
         }
     }
 
