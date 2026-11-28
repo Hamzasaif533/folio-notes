@@ -242,7 +242,6 @@ struct EditorView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var toolbarPhotoItem: PhotosPickerItem?
     @State private var cover: EditorCover?
-    @State private var showImporter = false
     @State private var showGoTo = false
     @State private var goToText = ""
     @State private var showOutline = false
@@ -394,16 +393,6 @@ struct EditorView: View {
                 }
                 .ignoresSafeArea()
             }
-        }
-        .onChange(of: showImporter) { _, on in
-            // The iOS file picker straight from UIKit (SwiftUI's importer did nothing in LiveContainer).
-            guard on else { return }
-            showImporter = false
-            let shown = DocumentPicker.present(types: FileImporter.types, multiple: false) { urls in
-                guard let url = urls.first else { showToast("Couldn't copy that file into Folio"); return }
-                insertFile(url)
-            }
-            if !shown { showToast("The file picker couldn't open") }
         }
         .alert("Go to Page", isPresented: $showGoTo) {
             TextField("Page number", text: $goToText).keyboardType(.numberPad)
@@ -1357,6 +1346,15 @@ struct EditorView: View {
         }
     }
 
+    /// The iOS file picker straight from UIKit (SwiftUI's importer did nothing in LiveContainer).
+    private func pickFile() {
+        let shown = DocumentPicker.present(types: FileImporter.types, multiple: false) { urls in
+            guard let url = urls.first else { showToast("Couldn't copy that file into Folio"); return }
+            insertFile(url)
+        }
+        if !shown { showToast("The file picker couldn't open") }
+    }
+
     /// Adds a picked file after the current page (a PDF stays a PDF; other files become page pictures).
     private func insertFile(_ url: URL) {
         showToast("Importing \(url.lastPathComponent)…")
@@ -1395,7 +1393,7 @@ struct EditorView: View {
         case .pageFromCamera:
             closeMenus { cover = .cameraPage }
         case .importFile:
-            closeMenus { showImporter = true }
+            closeMenus { pickFile() }
         case .camera:
             closeMenus { cover = .cameraPhoto }
         case .stickyNote:
