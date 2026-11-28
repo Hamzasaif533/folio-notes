@@ -18,7 +18,6 @@ targets:
       # Files that come with the app (a private build puts course files here). Optional.
       - path: BundledFiles
         type: folder
-        optional: true
     info:
       path: Support/Info.plist
       properties:
